@@ -1,0 +1,8 @@
+{
+  "name": "Layout Lab",
+  "description": "Create pixel-accurate, watermark-free ChatGPT conversation screenshots with custom user prompts and word-for-word AI replies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
