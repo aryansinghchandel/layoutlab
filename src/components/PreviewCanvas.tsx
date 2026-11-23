@@ -101,9 +101,9 @@ const AssistantMessageContent = React.memo(function AssistantMessageContent({
         color: textColor,
         ...(isClean16x9
           ? {
-              fontSize: '26px',
-              lineHeight: 1.42,
-              letterSpacing: '-0.01em',
+              fontSize: '34px',
+              lineHeight: 1.3,
+              letterSpacing: '-0.015em',
             }
           : {}),
       }}
@@ -127,7 +127,7 @@ function SkinAssistantAvatar({
   customIcon?: CustomAiIconId;
   isClean16x9?: boolean;
 }) {
-  const boxSize = isClean16x9 ? '42px' : '28px';
+  const boxSize = isClean16x9 ? '48px' : '28px';
 
   if (senderSkin === 'claude') {
     return (
@@ -142,7 +142,7 @@ function SkinAssistantAvatar({
           marginTop: '2px',
         }}
       >
-        <ClaudeStarburstIcon size={isClean16x9 ? 30 : 20} color="#d97757" />
+        <ClaudeStarburstIcon size={isClean16x9 ? 34 : 20} color="#d97757" />
       </div>
     );
   }
@@ -160,7 +160,7 @@ function SkinAssistantAvatar({
           marginTop: '2px',
         }}
       >
-        <GeminiSparkIcon size={isClean16x9 ? 30 : 20} gradientId={gradientId} />
+        <GeminiSparkIcon size={isClean16x9 ? 34 : 20} gradientId={gradientId} />
       </div>
     );
   }
@@ -183,7 +183,7 @@ function SkinAssistantAvatar({
       >
         <CustomAiGlyphIcon
           icon={customIcon || 'sparkles'}
-          size={isClean16x9 ? 22 : 15}
+          size={isClean16x9 ? 25 : 15}
         />
       </div>
     );
@@ -206,9 +206,9 @@ function SkinAssistantAvatar({
       }}
     >
       {senderSkin === 'grok' ? (
-        <GrokSlashXIcon size={isClean16x9 ? 25 : 17} />
+        <GrokSlashXIcon size={isClean16x9 ? 28 : 17} />
       ) : (
-        <OpenAISwirlIcon size={isClean16x9 ? 24 : 16} />
+        <OpenAISwirlIcon size={isClean16x9 ? 27 : 16} />
       )}
     </div>
   );
@@ -223,13 +223,13 @@ function SkinActionIcons({
   mutedColor: string;
   isClean16x9?: boolean;
 }) {
-  const iconSize = isClean16x9 ? 21 : 15;
-  const googleSize = isClean16x9 ? 20 : 14;
+  const iconSize = isClean16x9 ? 22 : 15;
+  const googleSize = isClean16x9 ? 21 : 14;
   const rowStyle: React.CSSProperties = {
     display: 'flex',
     alignItems: 'center',
     gap: isClean16x9 ? '18px' : '12px',
-    marginTop: isClean16x9 ? '12px' : '10px',
+    marginTop: isClean16x9 ? '10px' : '10px',
     color: mutedColor,
   };
 
@@ -378,7 +378,7 @@ function AttachmentPreview({
           backgroundColor: palette.attachmentCardBg,
           border: `1px solid ${palette.attachmentCardBorder}`,
           color: palette.textPrimary,
-          fontSize: isClean16x9 ? '16px' : '12.5px',
+          fontSize: isClean16x9 ? '17px' : '12.5px',
           fontWeight: 500,
         }}
       >
@@ -423,7 +423,7 @@ function ThoughtPillBlock({
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div style={{ marginBottom: isClean16x9 ? '10px' : '10px' }}>
+    <div style={{ marginBottom: '10px' }}>
       <button
         type="button"
         onClick={() => setExpanded((prev) => !prev)}
@@ -436,7 +436,7 @@ function ThoughtPillBlock({
           backgroundColor: palette.thoughtBg,
           border: `1px solid ${palette.thoughtBorder}`,
           color: palette.thoughtText,
-          fontSize: isClean16x9 ? '16px' : '12.5px',
+          fontSize: isClean16x9 ? '17px' : '12.5px',
           fontWeight: 500,
           cursor: 'pointer',
           lineHeight: 1.3,
@@ -463,7 +463,7 @@ function ThoughtPillBlock({
             backgroundColor: palette.thoughtBg,
             border: `1px solid ${palette.thoughtBorder}`,
             color: palette.thoughtText,
-            fontSize: isClean16x9 ? '16px' : '12.5px',
+            fontSize: isClean16x9 ? '17px' : '12.5px',
             lineHeight: 1.5,
           }}
         >
@@ -534,29 +534,29 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
             style={{
               display: 'flex',
               alignItems: 'flex-start',
-              gap: isClean16x9 ? '14px' : '12px',
+              gap: isClean16x9 ? '16px' : '12px',
               backgroundColor: palette.userBubbleBg,
               border: `1px solid ${palette.userBubbleBorder}`,
               color: palette.textPrimary,
-              borderRadius: isClean16x9 ? '18px' : '14px',
-              padding: isClean16x9 ? '14px 20px' : '11px 14px',
-              fontSize: isClean16x9 ? '25px' : '15px',
-              lineHeight: isClean16x9 ? 1.4 : 1.55,
+              borderRadius: isClean16x9 ? '20px' : '14px',
+              padding: isClean16x9 ? '16px 22px' : '11px 14px',
+              fontSize: isClean16x9 ? '32px' : '15px',
+              lineHeight: isClean16x9 ? 1.3 : 1.55,
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
             }}
           >
             <div
               style={{
-                width: isClean16x9 ? '36px' : '24px',
-                height: isClean16x9 ? '36px' : '24px',
+                width: isClean16x9 ? '42px' : '24px',
+                height: isClean16x9 ? '42px' : '24px',
                 borderRadius: '9999px',
                 backgroundColor: isDark ? '#57544c' : '#2b2a27',
                 color: '#ffffff',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                fontSize: isClean16x9 ? '16px' : '11px',
+                fontSize: isClean16x9 ? '18px' : '11px',
                 fontWeight: 600,
                 flexShrink: 0,
               }}
@@ -591,7 +591,7 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
         >
           <div
             style={{
-              maxWidth: isClean16x9 ? '80%' : isMobile ? '80%' : '70%',
+              maxWidth: isClean16x9 ? '84%' : isMobile ? '80%' : '70%',
               backgroundColor: palette.userBubbleBg,
               border:
                 skin === 'grok' || skin === 'multi'
@@ -601,18 +601,18 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
               borderRadius:
                 skin === 'grok'
                   ? isClean16x9
-                    ? '18px'
+                    ? '20px'
                     : '14px'
                   : isClean16x9
-                    ? '28px'
+                    ? '30px'
                     : '22px',
               padding: isClean16x9
-                ? '14px 24px'
+                ? '16px 26px'
                 : isMobile
                   ? '10px 16px'
                   : '11px 18px',
-              fontSize: isClean16x9 ? '25px' : '15px',
-              lineHeight: isClean16x9 ? 1.4 : 1.55,
+              fontSize: isClean16x9 ? '32px' : '15px',
+              lineHeight: isClean16x9 ? 1.3 : 1.55,
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
             }}
@@ -664,13 +664,13 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
-                height: isClean16x9 ? '26px' : '19px',
+                height: isClean16x9 ? '28px' : '19px',
                 padding: isClean16x9 ? '0 10px' : '0 7px',
                 borderRadius: isClean16x9 ? '8px' : '6px',
                 backgroundColor: senderBadge.badgeBg,
                 color: senderBadge.badgeText,
                 border: `1px solid ${senderBadge.badgeBorder}`,
-                fontSize: isClean16x9 ? '14px' : '11px',
+                fontSize: isClean16x9 ? '15px' : '11px',
                 fontWeight: 600,
                 lineHeight: 1,
               }}
@@ -893,26 +893,26 @@ export function PreviewCanvas({
         isTheaterMode ? 'justify-center min-h-screen' : ''
       }`}
     >
-      {/* Inline override for 26px viral YouTube readability inside 16:9 Clean Focus */}
+      {/* Inline override for 34px viral YouTube readability inside 16:9 Clean Focus */}
       {isClean16x9 && (
         <style>{`
           .clean16x9-markdown,
           .clean16x9-markdown p,
           .clean16x9-markdown li,
           .clean16x9-markdown blockquote {
-            font-size: 26px !important;
-            line-height: 1.42 !important;
+            font-size: 34px !important;
+            line-height: 1.3 !important;
           }
-          .clean16x9-markdown h1 { font-size: 32px !important; }
-          .clean16x9-markdown h2 { font-size: 29px !important; }
-          .clean16x9-markdown h3 { font-size: 27px !important; }
+          .clean16x9-markdown h1 { font-size: 40px !important; }
+          .clean16x9-markdown h2 { font-size: 37px !important; }
+          .clean16x9-markdown h3 { font-size: 35px !important; }
           .clean16x9-markdown pre,
           .clean16x9-markdown pre code {
-            font-size: 21px !important;
-            line-height: 1.4 !important;
+            font-size: 25px !important;
+            line-height: 1.35 !important;
           }
           .clean16x9-markdown :not(pre) > code {
-            font-size: 23px !important;
+            font-size: 28px !important;
           }
         `}</style>
       )}
@@ -1301,7 +1301,7 @@ export function PreviewCanvas({
                     maxWidth: isClean16x9 || isMobile ? '100%' : '680px',
                     margin: '0 auto',
                     padding: isClean16x9
-                      ? '16px 22px'
+                      ? '14px 22px'
                       : isMobile
                         ? '16px 16px 24px 16px'
                         : '22px 24px 28px 24px',
@@ -1309,7 +1309,7 @@ export function PreviewCanvas({
                     display: 'flex',
                     flexDirection: 'column',
                     flex: messages.length === 0 && !isThinking ? 1 : undefined,
-                    gap: isClean16x9 ? '22px' : isMobile ? '22px' : '28px',
+                    gap: isClean16x9 ? '20px' : isMobile ? '22px' : '28px',
                     transform:
                       isClean16x9 && overflowOffset > 0
                         ? `translateY(-${overflowOffset}px)`
@@ -1335,7 +1335,7 @@ export function PreviewCanvas({
                         <span
                           className={skin === 'claude' ? 'skin-claude-serif' : undefined}
                           style={{
-                            fontSize: isClean16x9 ? '34px' : isMobile ? '22px' : '26px',
+                            fontSize: isClean16x9 ? '38px' : isMobile ? '22px' : '26px',
                             fontWeight: skin === 'claude' ? 500 : 600,
                             letterSpacing: '-0.02em',
                             color: palette.textPrimary,
@@ -1643,7 +1643,7 @@ export function PreviewCanvas({
                           <span
                             style={{
                               color: palette.textPrimary,
-                              fontSize: isClean16x9 ? '23px' : '15px',
+                              fontSize: isClean16x9 ? '25px' : '15px',
                               lineHeight: 1.4,
                               whiteSpace: 'pre-wrap',
                               wordBreak: 'break-word',
@@ -1655,7 +1655,7 @@ export function PreviewCanvas({
                           <span
                             style={{
                               color: palette.textMuted,
-                              fontSize: isClean16x9 ? '23px' : '15px',
+                              fontSize: isClean16x9 ? '25px' : '15px',
                               whiteSpace: 'nowrap',
                               overflow: 'hidden',
                               textOverflow: 'ellipsis',
