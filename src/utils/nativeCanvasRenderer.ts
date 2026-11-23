@@ -1,20 +1,32 @@
 import { marked, type Token, type Tokens } from 'marked';
-import type {
-  AiSkin,
-  ChatMessage,
-  DeviceMode,
-  MessageAttachment,
-  MessageRole,
-  PlaybackSpeed,
-  ThemeMode,
+import {
+  type AiSkin,
+  type ChatMessage,
+  type CustomAiIconId,
+  type DeviceMode,
+  getEffectivePlaybackMultiplier,
+  type MessageAttachment,
+  type MessageRole,
+  type MessageSenderSkin,
+  type PlaybackSpeed,
+  type PreviewMode,
+  type ThemeMode,
 } from '../types';
-import { AI_SKINS, getSkinPalette, type SkinPalette } from './skins';
+import {
+  AI_SKINS,
+  getSenderBadgeMeta,
+  getSkinPalette,
+  type SkinPalette,
+} from './skins';
 
 export interface RenderConfig {
   skin: AiSkin;
   modelLabel: string;
   theme: ThemeMode;
   device: DeviceMode;
+  previewMode: PreviewMode;
+  showHeader: boolean;
+  showSidebar: boolean;
   showIosStatusBar: boolean;
   showBottomBar: boolean;
   showFooterDisclaimer: boolean;
@@ -27,6 +39,10 @@ export interface RenderedFrameMessage {
   content: string;
   thoughtDuration?: string;
   attachment?: MessageAttachment | null;
+  senderSkin?: MessageSenderSkin;
+  customSenderName?: string;
+  customSenderColor?: string;
+  customSenderIcon?: CustomAiIconId;
   enterProgress: number;
   isStreaming: boolean;
 }
@@ -61,7 +77,7 @@ const CLAUDE_SERIF_FONT =
 const MONO_FONT =
   "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
 
-function getBodyFontFamily(skin: AiSkin): string {
+function getBodyFontFamily(skin: MessageSenderSkin | AiSkin): string {
   return skin === 'claude' ? CLAUDE_SERIF_FONT : INTER_FONT;
 }
 
@@ -126,8 +142,11 @@ interface TimelineSegment {
 export function buildAnimationTimeline(
   messages: ChatMessage[],
   speed: PlaybackSpeed,
-  showBottomBar: boolean
+  showBottomBar: boolean,
+  options?: { includeFinalHold?: boolean }
 ): AnimationTimeline {
+  const effectiveSpeed = getEffectivePlaybackMultiplier(speed);
+  const includeFinalHold = options?.includeFinalHold ?? true;
   const segments: TimelineSegment[] = [];
   let cursorMs = 0;
 
@@ -141,61 +160,63 @@ export function buildAnimationTimeline(
     cursorMs = endMs;
   };
 
-  pushSegment(Math.round(180 / speed), { kind: 'idle', msgIndex: -1 });
+  pushSegment(Math.round(180 / effectiveSpeed), { kind: 'idle', msgIndex: -1 });
 
   messages.forEach((msg, index) => {
     if (msg.role === 'user') {
       if (showBottomBar) {
         const chars = Array.from(msg.content);
         if (chars.length > 0) {
-          pushSegment(Math.round((chars.length * 22) / speed), {
+          pushSegment(Math.round((chars.length * 22) / effectiveSpeed), {
             kind: 'user_typing',
             msgIndex: index,
             chars,
           });
         }
-        pushSegment(Math.round(140 / speed), {
+        pushSegment(Math.round(140 / effectiveSpeed), {
           kind: 'user_presend',
           msgIndex: index,
         });
-        pushSegment(Math.round(220 / speed), {
+        pushSegment(Math.round(220 / effectiveSpeed), {
           kind: 'user_send_highlight',
           msgIndex: index,
         });
       }
-      pushSegment(Math.round(240 / speed), {
+      pushSegment(Math.round(240 / effectiveSpeed), {
         kind: 'user_slide',
         msgIndex: index,
       });
-      pushSegment(Math.round(200 / speed), {
+      pushSegment(Math.round(200 / effectiveSpeed), {
         kind: 'idle',
         msgIndex: index,
       });
     } else {
-      pushSegment(Math.round(1000 / speed), {
+      pushSegment(Math.round(1000 / effectiveSpeed), {
         kind: 'thinking',
         msgIndex: index,
       });
       const words = tokenizeWordsPreservingWhitespace(msg.content);
       if (words.length > 0) {
-        pushSegment(Math.round((words.length * 45) / speed), {
+        pushSegment(Math.round((words.length * 45) / effectiveSpeed), {
           kind: 'ai_stream',
           msgIndex: index,
           words,
         });
       }
-      pushSegment(Math.round(420 / speed), {
+      pushSegment(Math.round(420 / effectiveSpeed), {
         kind: 'idle',
         msgIndex: index,
       });
     }
   });
 
-  // 1.5-second pause on the completed final frame
-  pushSegment(1500, {
-    kind: 'final_hold',
-    msgIndex: messages.length - 1,
-  });
+  if (includeFinalHold) {
+    // 1.5-second pause on the completed final frame
+    pushSegment(1500, {
+      kind: 'final_hold',
+      msgIndex: messages.length - 1,
+    });
+  }
 
   const totalDurationMs = cursorMs;
 
@@ -228,6 +249,10 @@ export function buildAnimationTimeline(
           content: m.content,
           thoughtDuration: m.thoughtDuration,
           attachment: m.attachment,
+          senderSkin: m.senderSkin,
+          customSenderName: m.customSenderName,
+          customSenderColor: m.customSenderColor,
+          customSenderIcon: m.customSenderIcon,
           enterProgress: 1,
           isStreaming: false,
         });
@@ -252,6 +277,10 @@ export function buildAnimationTimeline(
         content: m.content,
         thoughtDuration: m.thoughtDuration,
         attachment: m.attachment,
+        senderSkin: m.senderSkin,
+        customSenderName: m.customSenderName,
+        customSenderColor: m.customSenderColor,
+        customSenderIcon: m.customSenderIcon,
         enterProgress: 1,
         isStreaming: false,
       });
@@ -283,6 +312,10 @@ export function buildAnimationTimeline(
           role: 'user',
           content: currentMsg.content,
           attachment: currentMsg.attachment,
+          senderSkin: currentMsg.senderSkin,
+          customSenderName: currentMsg.customSenderName,
+          customSenderColor: currentMsg.customSenderColor,
+          customSenderIcon: currentMsg.customSenderIcon,
           enterProgress: localProgress,
           isStreaming: false,
         });
@@ -301,6 +334,10 @@ export function buildAnimationTimeline(
           role: 'assistant',
           content: activeSeg.words.slice(0, count).join(''),
           thoughtDuration: currentMsg.thoughtDuration,
+          senderSkin: currentMsg.senderSkin,
+          customSenderName: currentMsg.customSenderName,
+          customSenderColor: currentMsg.customSenderColor,
+          customSenderIcon: currentMsg.customSenderIcon,
           enterProgress: 1,
           isStreaming: true,
         });
@@ -370,16 +407,72 @@ let cachedGeminiPath: Path2D | null = null;
 
 function drawAiAvatar(
   ctx: CanvasRenderingContext2D,
-  skin: AiSkin,
+  skin: MessageSenderSkin,
   x: number,
   y: number,
-  palette: SkinPalette
+  palette: SkinPalette,
+  customColor?: string,
+  customIcon?: CustomAiIconId,
+  avatarSize = 28
 ) {
-  const size = 28;
+  const size = avatarSize;
+  const ratio = size / 28;
   const cx = x + size / 2;
   const cy = y + size / 2;
 
   ctx.save();
+  if (skin === 'custom') {
+    ctx.beginPath();
+    ctx.arc(cx, cy, size / 2, 0, Math.PI * 2);
+    ctx.fillStyle = customColor || '#6366f1';
+    ctx.fill();
+
+    const glyphHalf = 7.5 * ratio;
+    ctx.translate(cx - glyphHalf, cy - glyphHalf);
+    ctx.scale((15 * ratio) / 24, (15 * ratio) / 24);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    switch (customIcon) {
+      case 'bot':
+        ctx.stroke(new Path2D('M12 8V4H8'));
+        roundedRectPath(ctx, 4, 8, 16, 12, 2);
+        ctx.stroke();
+        ctx.stroke(new Path2D('M2 14h2M20 14h2M15 13v2M9 13v2'));
+        break;
+      case 'zap':
+        ctx.stroke(new Path2D('M13 2 3 14h9l-1 8 10-12h-9l1-8Z'));
+        break;
+      case 'cpu':
+        roundedRectPath(ctx, 4, 4, 16, 16, 2);
+        ctx.stroke();
+        roundedRectPath(ctx, 9, 9, 6, 6, 1);
+        ctx.stroke();
+        ctx.stroke(new Path2D('M15 2v2M9 2v2M15 20v2M9 20v2M2 9h2M2 15h2M20 9h2M20 15h2'));
+        break;
+      case 'terminal':
+        ctx.stroke(new Path2D('m4 17 6-6-6-6M12 19h8'));
+        break;
+      case 'globe':
+        ctx.beginPath();
+        ctx.arc(12, 12, 10, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.stroke(new Path2D('M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20'));
+        break;
+      case 'sparkles':
+      default:
+        ctx.stroke(
+          new Path2D(
+            'M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z'
+          )
+        );
+        break;
+    }
+    ctx.restore();
+    return;
+  }
+
   if (skin === 'chatgpt' || skin === 'grok') {
     ctx.beginPath();
     ctx.arc(cx, cy, size / 2, 0, Math.PI * 2);
@@ -391,8 +484,9 @@ function drawAiAvatar(
   }
 
   if (skin === 'claude') {
-    ctx.translate(cx - 10, cy - 10);
-    ctx.scale(20 / 24, 20 / 24);
+    const iconHalf = 10 * ratio;
+    ctx.translate(cx - iconHalf, cy - iconHalf);
+    ctx.scale((20 * ratio) / 24, (20 * ratio) / 24);
     ctx.strokeStyle = '#d97757';
     ctx.lineWidth = 2.1;
     ctx.lineCap = 'round';
@@ -418,8 +512,9 @@ function drawAiAvatar(
     ctx.stroke();
   } else if (skin === 'gemini') {
     if (!cachedGeminiPath) cachedGeminiPath = new Path2D(GEMINI_SPARK_PATH);
-    ctx.translate(cx - 10, cy - 10);
-    ctx.scale(20 / 24, 20 / 24);
+    const iconHalf = 10 * ratio;
+    ctx.translate(cx - iconHalf, cy - iconHalf);
+    ctx.scale((20 * ratio) / 24, (20 * ratio) / 24);
     const grad = ctx.createLinearGradient(2, 2, 22, 22);
     grad.addColorStop(0, '#4285f4');
     grad.addColorStop(0.52, '#9b72cb');
@@ -427,8 +522,9 @@ function drawAiAvatar(
     ctx.fillStyle = grad;
     ctx.fill(cachedGeminiPath);
   } else if (skin === 'grok') {
-    ctx.translate(cx - 8.5, cy - 8.5);
-    ctx.scale(17 / 24, 17 / 24);
+    const iconHalf = 8.5 * ratio;
+    ctx.translate(cx - iconHalf, cy - iconHalf);
+    ctx.scale((17 * ratio) / 24, (17 * ratio) / 24);
     ctx.strokeStyle = palette.textPrimary;
     ctx.lineWidth = 2.2;
     ctx.lineCap = 'round';
@@ -441,8 +537,9 @@ function drawAiAvatar(
     ctx.stroke();
   } else {
     if (!cachedSwirlPath) cachedSwirlPath = new Path2D(OPENAI_SWIRL_PATH);
-    ctx.translate(cx - 8, cy - 8);
-    ctx.scale(16 / 24, 16 / 24);
+    const iconHalf = 8 * ratio;
+    ctx.translate(cx - iconHalf, cy - iconHalf);
+    ctx.scale((16 * ratio) / 24, (16 * ratio) / 24);
     ctx.fillStyle = palette.textPrimary;
     ctx.fill(cachedSwirlPath);
   }
@@ -650,11 +747,12 @@ function drawMicIcon(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  color: string
+  color: string,
+  size = 18
 ) {
   ctx.save();
   ctx.translate(x, y);
-  ctx.scale(18 / 24, 18 / 24);
+  ctx.scale(size / 24, size / 24);
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.9;
   ctx.lineCap = 'round';
@@ -672,11 +770,12 @@ function drawPaperclipIcon(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  color: string
+  color: string,
+  size = 18
 ) {
   ctx.save();
   ctx.translate(x, y);
-  ctx.scale(18 / 24, 18 / 24);
+  ctx.scale(size / 24, size / 24);
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.9;
   ctx.lineCap = 'round';
@@ -693,11 +792,12 @@ function drawVoiceWaveformIcon(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  color: string
+  color: string,
+  size = 18
 ) {
   ctx.save();
   ctx.translate(x, y);
-  ctx.scale(18 / 24, 18 / 24);
+  ctx.scale(size / 24, size / 24);
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.lineCap = 'round';
@@ -721,11 +821,12 @@ function drawSendArrowIcon(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  color: string
+  color: string,
+  size = 15
 ) {
   ctx.save();
   ctx.translate(x, y);
-  ctx.scale(15 / 24, 15 / 24);
+  ctx.scale(size / 24, size / 24);
   ctx.strokeStyle = color;
   ctx.lineWidth = 2.4;
   ctx.lineCap = 'round';
@@ -742,12 +843,20 @@ function drawSendArrowIcon(
 
 function drawSingleActionIcon(
   ctx: CanvasRenderingContext2D,
-  kind: 'copy' | 'up' | 'down' | 'retry' | 'share' | 'sliders' | 'google',
+  kind:
+    | 'copy'
+    | 'up'
+    | 'down'
+    | 'speaker'
+    | 'retry'
+    | 'share'
+    | 'sliders'
+    | 'google',
   x: number,
   y: number,
-  color: string
+  color: string,
+  size = 15
 ) {
-  const size = 15;
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(size / 24, size / 24);
@@ -777,6 +886,11 @@ function drawSingleActionIcon(
           'M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z'
         )
       );
+      break;
+    case 'speaker':
+      ctx.stroke(new Path2D('M11 5 6 9H2v6h4l5 4V5Z'));
+      ctx.stroke(new Path2D('M15.54 8.46a5 5 0 0 1 0 7.07'));
+      ctx.stroke(new Path2D('M19.07 4.93a10 10 0 0 1 0 14.14'));
       break;
     case 'retry':
       ctx.stroke(new Path2D('M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8'));
@@ -837,30 +951,37 @@ function drawSingleActionIcon(
 
 function drawSkinActionIconsRow(
   ctx: CanvasRenderingContext2D,
-  skin: AiSkin,
+  skin: MessageSenderSkin,
   x: number,
   y: number,
-  color: string
+  color: string,
+  iconSize = 15,
+  stepX = 27
 ) {
-  let icons: Array<'copy' | 'up' | 'down' | 'retry' | 'share' | 'sliders' | 'google'>;
+  let icons: Array<
+    'copy' | 'up' | 'down' | 'speaker' | 'retry' | 'share' | 'sliders' | 'google'
+  >;
   switch (skin) {
     case 'claude':
       icons = ['copy', 'up', 'down', 'retry'];
       break;
     case 'gemini':
-      icons = ['up', 'down', 'sliders', 'share', 'copy', 'google'];
+      icons = ['up', 'down', 'retry', 'share', 'google'];
       break;
     case 'grok':
-      icons = ['retry', 'copy', 'up', 'down', 'share'];
+      icons = ['retry', 'copy', 'share', 'up', 'down'];
+      break;
+    case 'custom':
+      icons = ['copy', 'up', 'down', 'retry'];
       break;
     case 'chatgpt':
     default:
-      icons = ['copy', 'up', 'down', 'retry'];
+      icons = ['copy', 'up', 'down', 'speaker', 'retry', 'share'];
       break;
   }
 
   icons.forEach((kind, idx) => {
-    drawSingleActionIcon(ctx, kind, x + idx * 27, y, color);
+    drawSingleActionIcon(ctx, kind, x + idx * stepX, y, color, iconSize);
   });
 }
 
@@ -1252,11 +1373,14 @@ function processMarkdownBlock(
   maxWidth: number,
   palette: SkinPalette,
   fontFamily: string,
-  draw: boolean
+  draw: boolean,
+  textScale = 1
 ): MarkdownDrawResult {
+  const bodySize = Math.round(15 * textScale);
+  const bodyLineH = Math.round(24.5 * textScale * 10) / 10;
   let y = startY;
   let lastCursorX = startX;
-  let lastCursorY = startY + 12;
+  let lastCursorY = startY + bodyLineH / 2;
   let lastCursorColor = palette.textPrimary;
 
   const drawLines = (
@@ -1311,16 +1435,23 @@ function processMarkdownBlock(
     if (tok.type === 'paragraph') {
       const p = tok as Tokens.Paragraph;
       const runs = flattenInlineTokens(p.tokens);
-      const lines = layoutInlineRuns(ctx, runs, maxWidth, 15, 24.5, fontFamily);
-      drawLines(lines, startX, palette.textPrimary, 15);
-      if (!isLast) y += 10;
+      const lines = layoutInlineRuns(
+        ctx,
+        runs,
+        maxWidth,
+        bodySize,
+        bodyLineH,
+        fontFamily
+      );
+      drawLines(lines, startX, palette.textPrimary, bodySize);
+      if (!isLast) y += Math.round(10 * textScale);
       continue;
     }
 
     if (tok.type === 'heading') {
       const h = tok as Tokens.Heading;
-      if (idx > 0) y += 6;
-      const size = h.depth === 1 ? 22 : h.depth === 2 ? 18 : 16;
+      if (idx > 0) y += Math.round(6 * textScale);
+      const size = Math.round((h.depth === 1 ? 22 : h.depth === 2 ? 18 : 16) * textScale);
       const lh = Math.round(size * 1.38);
       const runs = flattenInlineTokens(h.tokens, {
         bold: true,
@@ -1329,14 +1460,14 @@ function processMarkdownBlock(
       });
       const lines = layoutInlineRuns(ctx, runs, maxWidth, size, lh, fontFamily);
       drawLines(lines, startX, palette.textPrimary, size);
-      if (!isLast) y += 8;
+      if (!isLast) y += Math.round(8 * textScale);
       continue;
     }
 
     if (tok.type === 'list') {
       const list = tok as Tokens.List;
       if (idx > 0) y += 2;
-      const indent = 22;
+      const indent = Math.round(22 * textScale);
       const startNum = typeof list.start === 'number' ? list.start : 1;
 
       list.items.forEach((item, itemIdx) => {
@@ -1356,21 +1487,21 @@ function processMarkdownBlock(
           ctx,
           runs,
           Math.max(60, maxWidth - indent),
-          15,
-          24,
+          bodySize,
+          Math.round(24 * textScale),
           fontFamily
         );
 
         if (draw) {
           ctx.fillStyle = palette.textSecondary;
-          ctx.font = `500 15px ${fontFamily}`;
+          ctx.font = `500 ${bodySize}px ${fontFamily}`;
           ctx.textBaseline = 'middle';
-          ctx.fillText(marker, startX + 4, y + 12);
+          ctx.fillText(marker, startX + 4, y + Math.round(12 * textScale));
         }
-        drawLines(lines, startX + indent, palette.textPrimary, 15);
-        y += 5;
+        drawLines(lines, startX + indent, palette.textPrimary, bodySize);
+        y += Math.round(5 * textScale);
       });
-      if (!isLast) y += 6;
+      if (!isLast) y += Math.round(6 * textScale);
       continue;
     }
 
@@ -1381,16 +1512,17 @@ function processMarkdownBlock(
         c.lang && c.lang.trim()
           ? c.lang.trim().split(/\s+/)[0].toLowerCase()
           : 'code';
-      const headerH = 30;
-      const codeFont = `400 13px ${MONO_FONT}`;
+      const headerH = Math.round(30 * (textScale > 1 ? 1.2 : 1));
+      const codeSize = Math.round(13 * (textScale > 1 ? 1.27 : 1));
+      const codeFont = `400 ${codeSize}px ${MONO_FONT}`;
       const codeLines = wrapPlainText(
         ctx,
         c.text,
-        Math.max(80, maxWidth - 32),
+        Math.max(80, maxWidth - 36),
         codeFont
       );
-      const codeLineH = 20;
-      const bodyPadY = 14;
+      const codeLineH = Math.round(codeSize * 1.54);
+      const bodyPadY = textScale > 1 ? 16 : 14;
       const bodyH = codeLines.length * codeLineH + bodyPadY * 2;
       const totalBoxH = headerH + bodyH;
 
@@ -1406,21 +1538,22 @@ function processMarkdownBlock(
         roundedTopRectPath(ctx, startX, y, maxWidth, headerH, 10);
         ctx.fill();
 
+        const headerFontSize = textScale > 1 ? 14 : 12;
         ctx.fillStyle = '#b4b4b4';
-        ctx.font = `400 12px ${INTER_FONT}`;
+        ctx.font = `400 ${headerFontSize}px ${INTER_FONT}`;
         ctx.textBaseline = 'middle';
-        ctx.fillText(lang, startX + 14, y + headerH / 2);
+        ctx.fillText(lang, startX + 16, y + headerH / 2);
 
         const copyLabel = 'Copy code';
         const copyTextW = ctx.measureText(copyLabel).width;
         ctx.fillText(
           copyLabel,
-          startX + maxWidth - 14 - copyTextW,
+          startX + maxWidth - 16 - copyTextW,
           y + headerH / 2
         );
         ctx.save();
         ctx.translate(
-          startX + maxWidth - 14 - copyTextW - 18,
+          startX + maxWidth - 16 - copyTextW - 18,
           y + headerH / 2 - 6.5
         );
         ctx.scale(13 / 24, 13 / 24);
@@ -1439,14 +1572,14 @@ function processMarkdownBlock(
         codeLines.forEach((cl, lineIdx) => {
           const lineY =
             y + headerH + bodyPadY + lineIdx * codeLineH + codeLineH / 2;
-          ctx.fillText(cl, startX + 16, lineY);
+          ctx.fillText(cl, startX + 18, lineY);
         });
       }
 
       const lastCodeLine = codeLines[codeLines.length - 1] ?? '';
       ctx.font = codeFont;
       const lastCodeW = ctx.measureText(lastCodeLine).width;
-      lastCursorX = startX + 16 + lastCodeW;
+      lastCursorX = startX + 18 + lastCodeW;
       lastCursorY =
         y +
         headerH +
@@ -1466,12 +1599,13 @@ function processMarkdownBlock(
       const innerRes = processMarkdownBlock(
         ctx,
         bq.tokens,
-        startX + 14,
+        startX + Math.round(14 * textScale),
         y,
-        Math.max(60, maxWidth - 14),
+        Math.max(60, maxWidth - Math.round(14 * textScale)),
         { ...palette, textPrimary: palette.blockquoteFg },
         fontFamily,
-        draw
+        draw,
+        textScale
       );
       if (draw) {
         ctx.fillStyle = palette.blockquoteBorder;
@@ -1481,7 +1615,7 @@ function processMarkdownBlock(
       lastCursorX = innerRes.cursorX;
       lastCursorY = innerRes.cursorY;
       lastCursorColor = innerRes.cursorColor;
-      if (!isLast) y += 10;
+      if (!isLast) y += Math.round(10 * textScale);
       continue;
     }
 
@@ -1505,9 +1639,16 @@ function processMarkdownBlock(
           underline: false,
         },
       ];
-      const lines = layoutInlineRuns(ctx, runs, maxWidth, 15, 24, fontFamily);
-      drawLines(lines, startX, palette.textPrimary, 15);
-      if (!isLast) y += 8;
+      const lines = layoutInlineRuns(
+        ctx,
+        runs,
+        maxWidth,
+        bodySize,
+        Math.round(24 * textScale),
+        fontFamily
+      );
+      drawLines(lines, startX, palette.textPrimary, bodySize);
+      if (!isLast) y += Math.round(8 * textScale);
     }
   }
 
@@ -1612,13 +1753,20 @@ export function computeLogicalDimensions(
   finalMessages: ChatMessage[],
   imageCache: Map<string, HTMLImageElement> = new Map()
 ): { width: number; height: number } {
+  if (config.previewMode === 'clean16x9') {
+    return { width: 960, height: 540 };
+  }
+
   const isMobile = config.device === 'mobile';
+  const sidebarW = config.showSidebar && !isMobile ? 196 : 0;
   const width = isMobile ? 390 : 760;
+  const chatAreaW = width - sidebarW;
   const baseMinHeight = isMobile ? 640 : 540;
   const maxViewportHeight = isMobile ? 844 : 760;
 
-  const statusH = isMobile && config.showIosStatusBar ? 38 : 0;
-  const headerH = isMobile ? 48 : 56;
+  const statusH =
+    config.showHeader && isMobile && config.showIosStatusBar ? 38 : 0;
+  const headerH = config.showHeader ? (isMobile ? 48 : 56) : 0;
   const composerTallSkin =
     config.skin === 'claude' || config.skin === 'grok';
   const composerH = config.showBottomBar
@@ -1632,13 +1780,12 @@ export function computeLogicalDimensions(
     : 0;
   const disclaimerH = config.showFooterDisclaimer ? 24 : 0;
 
-  const contentContainerW = isMobile ? width : Math.min(width, 680);
+  const contentContainerW = isMobile ? chatAreaW : Math.min(chatAreaW, 680);
   const padX = isMobile ? 16 : 24;
   const padTop = isMobile ? 16 : 22;
   const padBottom = isMobile ? 24 : 28;
   const msgGap = isMobile ? 22 : 28;
   const palette = getSkinPalette(config.skin, config.theme);
-  const bodyFont = getBodyFontFamily(config.skin);
 
   let messagesH = 0;
   finalMessages.forEach((msg, idx) => {
@@ -1665,8 +1812,11 @@ export function computeLogicalDimensions(
     } else {
       const avatarGap = isMobile ? 12 : 16;
       const bodyMaxW = contentContainerW - padX * 2 - 28 - avatarGap;
+      const senderBadgeH = config.skin === 'multi' ? 24 : 0;
       const thoughtH =
         config.enableThoughtPill && msg.thoughtDuration?.trim() ? 36 : 0;
+      const effectiveSender: MessageSenderSkin =
+        config.skin === 'multi' ? (msg.senderSkin ?? 'chatgpt') : config.skin;
       const mdRes = processMarkdownBlock(
         ctx,
         getMarkdownTokens(msg.content),
@@ -1674,10 +1824,10 @@ export function computeLogicalDimensions(
         0,
         bodyMaxW,
         palette,
-        bodyFont,
+        getBodyFontFamily(effectiveSender),
         false
       );
-      messagesH += Math.max(28, thoughtH + mdRes.height + 25);
+      messagesH += Math.max(28, senderBadgeH + thoughtH + mdRes.height + 25);
     }
   });
 
@@ -1699,6 +1849,47 @@ export function computeLogicalDimensions(
   };
 }
 
+function drawInFrameSidebar(
+  ctx: CanvasRenderingContext2D,
+  sidebarW: number,
+  logicalHeight: number,
+  palette: SkinPalette,
+  skin: AiSkin
+) {
+  ctx.save();
+  ctx.fillStyle = palette.sidebarBg;
+  ctx.fillRect(0, 0, sidebarW, logicalHeight);
+  ctx.fillStyle = palette.sidebarBorder;
+  ctx.fillRect(sidebarW - 1, 0, 1, logicalHeight);
+
+  // Top New Chat row
+  drawSidebarToggleIcon(ctx, 16, 18, palette.textSecondary);
+  drawNewChatIcon(ctx, sidebarW - 34, 18, 18, palette.textSecondary);
+
+  const items = [
+    'Active conversation',
+    'API refactor notes',
+    'Release checklist',
+    'UI layout brainstorm',
+  ];
+
+  items.forEach((label, idx) => {
+    const iy = 64 + idx * 34;
+    if (idx === 0) {
+      ctx.fillStyle = palette.pillBg;
+      roundedRectPath(ctx, 10, iy - 14, sidebarW - 20, 28, 8);
+      ctx.fill();
+    }
+    ctx.fillStyle = idx === 0 ? palette.textPrimary : palette.textSecondary;
+    ctx.font = `${idx === 0 ? 500 : 400} 12.5px ${
+      skin === 'claude' ? CLAUDE_SERIF_FONT : INTER_FONT
+    }`;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, 18, iy);
+  });
+  ctx.restore();
+}
+
 export function renderChatFrameToCanvas(
   ctx: CanvasRenderingContext2D,
   logicalWidth: number,
@@ -1709,11 +1900,28 @@ export function renderChatFrameToCanvas(
   scrollState: ScrollState,
   imageCache: Map<string, HTMLImageElement> = new Map()
 ): void {
-  const isMobile = config.device === 'mobile';
+  const isClean16x9 = config.previewMode === 'clean16x9';
+  const isMobile = !isClean16x9 && config.device === 'mobile';
+  const textScale = isClean16x9 ? 1.333 : 1;
+  const msgFontSize = isClean16x9 ? 20 : 15;
+  const userLineH = isClean16x9 ? 30 : 23;
+  const avatarSize = isClean16x9 ? 36 : 28;
+  const avatarGap = isClean16x9 ? 20 : isMobile ? 12 : 16;
   const palette = getSkinPalette(config.skin, config.theme);
   const skinMeta = AI_SKINS[config.skin];
   const displayModel = config.modelLabel.trim() || skinMeta.defaultModel;
-  const bodyFont = getBodyFontFamily(config.skin);
+  const sidebarW = config.showSidebar && !isMobile ? 196 : 0;
+  const chatAreaX = sidebarW;
+  const chatAreaW = logicalWidth - sidebarW;
+
+  const composerPlaceholderText =
+    isClean16x9 || config.skin === 'multi'
+      ? 'Ask anything'
+      : skinMeta.composerPlaceholder;
+  const disclaimerText =
+    isClean16x9 || config.skin === 'multi'
+      ? 'AI can make mistakes. Check important info.'
+      : skinMeta.disclaimer;
 
   ctx.save();
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
@@ -1723,20 +1931,25 @@ export function renderChatFrameToCanvas(
   ctx.fillRect(0, 0, logicalWidth, logicalHeight);
 
   // Top Chrome Geometry
-  const statusH = isMobile && config.showIosStatusBar ? 38 : 0;
-  const headerH = isMobile ? 48 : 56;
+  const statusH =
+    config.showHeader && isMobile && config.showIosStatusBar ? 38 : 0;
+  const headerH = config.showHeader ? (isMobile ? 48 : 56) : 0;
   const topChromeH = statusH + headerH;
 
-  // Bottom Chrome Geometry (Composer + optional Footer Disclaimer)
-  const composerOuterW = isMobile
-    ? logicalWidth - 28
-    : Math.min(logicalWidth, 680) - 48;
-  const composerLeft = (logicalWidth - composerOuterW) / 2;
+  // Bottom Chrome Geometry (Edge-to-Edge in 16:9 Clean Focus)
+  const composerOuterW = isClean16x9
+    ? chatAreaW - 44
+    : isMobile
+      ? chatAreaW - 28
+      : Math.min(chatAreaW, 680) - 48;
+  const composerLeft = chatAreaX + (chatAreaW - composerOuterW) / 2;
   const isTwoRowComposer =
-    config.skin === 'claude' || config.skin === 'grok';
+    !isClean16x9 && (config.skin === 'claude' || config.skin === 'grok');
+  const composerFontSize = isClean16x9 ? 20 : 15;
+  const composerLineH = isClean16x9 ? 29 : 22;
   const composerTextMaxW = isTwoRowComposer
     ? Math.max(80, composerOuterW - 32)
-    : Math.max(80, composerOuterW - 118);
+    : Math.max(80, composerOuterW - (isClean16x9 ? 152 : 118));
 
   let composerLines: string[] = [];
   let composerBoxH = 0;
@@ -1746,22 +1959,24 @@ export function renderChatFrameToCanvas(
         ctx,
         frame.composerDraft,
         composerTextMaxW,
-        `400 15px ${INTER_FONT}`
+        `400 ${composerFontSize}px ${INTER_FONT}`
       );
     }
-    const textH = Math.max(22, composerLines.length * 22);
+    const textH = Math.max(composerLineH, composerLines.length * composerLineH);
     composerBoxH = isTwoRowComposer
       ? textH + 54
-      : textH + (isMobile ? 18 : 22);
+      : textH + (isClean16x9 ? 28 : isMobile ? 18 : 22);
   }
 
-  const disclaimerH = config.showFooterDisclaimer ? 24 : 0;
+  const disclaimerH = config.showFooterDisclaimer ? (isClean16x9 ? 26 : 24) : 0;
   const composerPadBottom = config.showBottomBar
     ? config.showFooterDisclaimer
       ? 6
-      : isMobile
+      : isClean16x9
         ? 18
-        : 24
+        : isMobile
+          ? 18
+          : 24
     : config.showFooterDisclaimer
       ? 12
       : 0;
@@ -1770,17 +1985,21 @@ export function renderChatFrameToCanvas(
     disclaimerH +
     composerPadBottom;
   const scrollViewportH = Math.max(
-    100,
+    80,
     logicalHeight - topChromeH - bottomChromeH
   );
 
-  // Measure visible messages for smooth auto-scroll
-  const contentContainerW = isMobile ? logicalWidth : Math.min(logicalWidth, 680);
-  const contentOriginX = (logicalWidth - contentContainerW) / 2;
-  const padX = isMobile ? 16 : 24;
-  const padTop = isMobile ? 16 : 22;
-  const padBottom = isMobile ? 18 : 22;
-  const msgGap = isMobile ? 22 : 28;
+  // Measure visible messages for smooth auto-scroll (edge-to-edge in 16:9 Clean Focus)
+  const contentContainerW = isClean16x9
+    ? chatAreaW
+    : isMobile
+      ? chatAreaW
+      : Math.min(chatAreaW, 680);
+  const contentOriginX = chatAreaX + (chatAreaW - contentContainerW) / 2;
+  const padX = isClean16x9 ? 22 : isMobile ? 16 : 24;
+  const padTop = isClean16x9 ? 20 : isMobile ? 16 : 22;
+  const padBottom = isClean16x9 ? 20 : isMobile ? 18 : 22;
+  const msgGap = isClean16x9 ? 30 : isMobile ? 22 : 28;
   const bodyX = contentOriginX + padX;
   const bodyW = contentContainerW - padX * 2;
 
@@ -1805,14 +2024,18 @@ export function renderChatFrameToCanvas(
     if (msg.role === 'user') {
       const attSize = measureAttachmentBlock(msg.attachment, imageCache);
       const attH = attSize.height > 0 ? attSize.height + 8 : 0;
-      const font = `400 15px ${INTER_FONT}`;
+      const font = `400 ${msgFontSize}px ${INTER_FONT}`;
 
       if (config.skin === 'claude') {
-        const innerPadX = 14;
-        const innerPadY = 11;
-        const textMaxW = bodyW - innerPadX * 2 - 36;
+        const innerPadX = isClean16x9 ? 18 : 14;
+        const innerPadY = isClean16x9 ? 14 : 11;
+        const uCircleOffset = isClean16x9 ? 46 : 36;
+        const textMaxW = bodyW - innerPadX * 2 - uCircleOffset;
         const lines = wrapPlainText(ctx, msg.content || ' ', textMaxW, font);
-        const bubbleH = Math.max(44, lines.length * 23 + innerPadY * 2);
+        const bubbleH = Math.max(
+          isClean16x9 ? 56 : 44,
+          lines.length * userLineH + innerPadY * 2
+        );
         layoutItems.push({
           kind: 'user',
           y: cursorContentY,
@@ -1825,9 +2048,9 @@ export function renderChatFrameToCanvas(
         });
         cursorContentY += attH + bubbleH;
       } else {
-        const maxBubbleW = bodyW * (isMobile ? 0.8 : 0.7);
-        const innerPadX = isMobile ? 16 : 18;
-        const innerPadY = isMobile ? 10 : 11;
+        const maxBubbleW = bodyW * (isClean16x9 ? 0.76 : isMobile ? 0.8 : 0.7);
+        const innerPadX = isClean16x9 ? 22 : isMobile ? 16 : 18;
+        const innerPadY = isClean16x9 ? 14 : isMobile ? 10 : 11;
         const lines = wrapPlainText(
           ctx,
           msg.content || ' ',
@@ -1839,8 +2062,8 @@ export function renderChatFrameToCanvas(
         for (const l of lines) {
           maxLineW = Math.max(maxLineW, ctx.measureText(l).width);
         }
-        const bubbleW = Math.min(maxBubbleW, Math.max(44, maxLineW + innerPadX * 2));
-        const bubbleH = lines.length * 23 + innerPadY * 2;
+        const bubbleW = Math.min(maxBubbleW, Math.max(52, maxLineW + innerPadX * 2));
+        const bubbleH = lines.length * userLineH + innerPadY * 2;
         layoutItems.push({
           kind: 'user',
           y: cursorContentY,
@@ -1854,9 +2077,10 @@ export function renderChatFrameToCanvas(
         cursorContentY += attH + bubbleH;
       }
     } else {
-      const avatarGap = isMobile ? 12 : 16;
-      const mdMaxW = bodyW - 28 - avatarGap;
+      const mdMaxW = bodyW - avatarSize - avatarGap;
       const tokens = getMarkdownTokens(msg.content);
+      const effectiveSender: MessageSenderSkin =
+        config.skin === 'multi' ? (msg.senderSkin ?? 'chatgpt') : config.skin;
       const mdRes = processMarkdownBlock(
         ctx,
         tokens,
@@ -1864,13 +2088,22 @@ export function renderChatFrameToCanvas(
         0,
         mdMaxW,
         palette,
-        bodyFont,
-        false
+        getBodyFontFamily(effectiveSender),
+        false,
+        textScale
       );
+      const senderBadgeH = config.skin === 'multi' ? (isClean16x9 ? 31 : 24) : 0;
       const thoughtH =
-        config.enableThoughtPill && msg.thoughtDuration?.trim() ? 36 : 0;
-      const actionsH = msg.isStreaming ? 0 : 25;
-      const itemH = Math.max(28, thoughtH + mdRes.height + actionsH);
+        config.enableThoughtPill && msg.thoughtDuration?.trim()
+          ? isClean16x9
+            ? 44
+            : 36
+          : 0;
+      const actionsH = msg.isStreaming ? 0 : isClean16x9 ? 32 : 25;
+      const itemH = Math.max(
+        avatarSize,
+        senderBadgeH + thoughtH + mdRes.height + actionsH
+      );
       layoutItems.push({
         kind: 'assistant',
         y: cursorContentY,
@@ -1887,9 +2120,9 @@ export function renderChatFrameToCanvas(
     layoutItems.push({
       kind: 'thinking',
       y: cursorContentY,
-      height: 28,
+      height: avatarSize,
     });
-    cursorContentY += 28;
+    cursorContentY += avatarSize;
   }
 
   const totalContentH = cursorContentY + padBottom;
@@ -1903,7 +2136,7 @@ export function renderChatFrameToCanvas(
   // Draw Scrollable Chat Feed Clipped Between Top Chrome & Bottom Chrome
   ctx.save();
   ctx.beginPath();
-  ctx.rect(0, topChromeH, logicalWidth, scrollViewportH);
+  ctx.rect(chatAreaX, topChromeH, chatAreaW, scrollViewportH);
   ctx.clip();
 
   for (const item of layoutItems) {
@@ -1948,73 +2181,132 @@ export function renderChatFrameToCanvas(
       }
 
       if (config.skin === 'claude') {
-        // Claude warm block card with left initial circle
+        const innerPadX = isClean16x9 ? 18 : 14;
+        const innerPadY = isClean16x9 ? 14 : 11;
+        const uCircleR = isClean16x9 ? 16 : 12;
+        const uCircleCx = bodyX + innerPadX + uCircleR;
+        const uCircleCy = textBubbleY + innerPadY + uCircleR;
+
         ctx.fillStyle = palette.userBubbleBg;
-        roundedRectPath(ctx, bodyX, textBubbleY, item.bubbleW, item.bubbleH, 14);
+        roundedRectPath(
+          ctx,
+          bodyX,
+          textBubbleY,
+          item.bubbleW,
+          item.bubbleH,
+          isClean16x9 ? 18 : 14
+        );
         ctx.fill();
         ctx.strokeStyle = palette.userBubbleBorder;
         ctx.lineWidth = 1;
         ctx.stroke();
 
-        // Initial circle
         ctx.fillStyle = config.theme === 'dark' ? '#57544c' : '#2b2a27';
         ctx.beginPath();
-        ctx.arc(bodyX + 26, textBubbleY + 22, 12, 0, Math.PI * 2);
+        ctx.arc(uCircleCx, uCircleCy, uCircleR, 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = '#ffffff';
-        ctx.font = `600 11px ${INTER_FONT}`;
+        ctx.font = `600 ${isClean16x9 ? 14 : 11}px ${INTER_FONT}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('U', bodyX + 26, textBubbleY + 22.5);
+        ctx.fillText('U', uCircleCx, uCircleCy + 0.5);
         ctx.textAlign = 'left';
 
         ctx.fillStyle = palette.textPrimary;
-        ctx.font = `400 15px ${INTER_FONT}`;
+        ctx.font = `400 ${msgFontSize}px ${INTER_FONT}`;
+        const textOffsetX = innerPadX + uCircleR * 2 + (isClean16x9 ? 14 : 12);
         item.userLines.forEach((line, li) => {
-          ctx.fillText(line, bodyX + 48, textBubbleY + 11 + li * 23 + 11.5);
+          ctx.fillText(
+            line,
+            bodyX + textOffsetX,
+            textBubbleY + innerPadY + li * userLineH + userLineH / 2
+          );
         });
       } else {
-        const radius = config.skin === 'grok' ? 14 : 22;
+        const radius =
+          config.skin === 'grok'
+            ? isClean16x9
+              ? 18
+              : 14
+            : isClean16x9
+              ? 26
+              : 22;
         const bx = bodyX + bodyW - item.bubbleW;
         ctx.fillStyle = palette.userBubbleBg;
         roundedRectPath(ctx, bx, textBubbleY, item.bubbleW, item.bubbleH, radius);
         ctx.fill();
-        if (config.skin === 'grok') {
+        if (config.skin === 'grok' || config.skin === 'multi') {
           ctx.strokeStyle = palette.userBubbleBorder;
           ctx.lineWidth = 1;
           ctx.stroke();
         }
 
         ctx.fillStyle = palette.textPrimary;
-        ctx.font = `400 15px ${INTER_FONT}`;
+        ctx.font = `400 ${msgFontSize}px ${INTER_FONT}`;
         ctx.textBaseline = 'middle';
-        const innerPadX = isMobile ? 16 : 18;
-        const innerPadY = isMobile ? 10 : 11;
+        const innerPadX = isClean16x9 ? 22 : isMobile ? 16 : 18;
+        const innerPadY = isClean16x9 ? 14 : isMobile ? 10 : 11;
         item.userLines.forEach((line, li) => {
           ctx.fillText(
             line,
             bx + innerPadX,
-            textBubbleY + innerPadY + li * 23 + 11.5
+            textBubbleY + innerPadY + li * userLineH + userLineH / 2
           );
         });
       }
       ctx.restore();
     } else if (item.kind === 'assistant' && item.msg && item.mdTokens) {
-      const avatarGap = isMobile ? 12 : 16;
-      const mdX = bodyX + 28 + avatarGap;
-      const mdW = bodyW - 28 - avatarGap;
+      const mdX = bodyX + avatarSize + avatarGap;
+      const mdW = bodyW - avatarSize - avatarGap;
+      const effectiveSender: MessageSenderSkin =
+        config.skin === 'multi'
+          ? (item.msg.senderSkin ?? 'chatgpt')
+          : config.skin;
 
-      drawAiAvatar(ctx, config.skin, bodyX, drawY + 1, palette);
+      drawAiAvatar(
+        ctx,
+        effectiveSender,
+        bodyX,
+        drawY + 1,
+        palette,
+        item.msg.customSenderColor,
+        item.msg.customSenderIcon,
+        avatarSize
+      );
 
       let contentDrawY = drawY;
+
+      if (config.skin === 'multi') {
+        const badge = getSenderBadgeMeta(item.msg, config.skin, config.theme);
+        const badgeFontSize = isClean16x9 ? 13.5 : 11;
+        const badgeH = isClean16x9 ? 24 : 19;
+        ctx.font = `600 ${badgeFontSize}px ${INTER_FONT}`;
+        const bw = ctx.measureText(badge.label).width + (isClean16x9 ? 18 : 14);
+        ctx.fillStyle = badge.badgeBg;
+        roundedRectPath(ctx, mdX, contentDrawY, bw, badgeH, isClean16x9 ? 7 : 6);
+        ctx.fill();
+        ctx.strokeStyle = badge.badgeBorder;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = badge.badgeText;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(
+          badge.label,
+          mdX + (isClean16x9 ? 9 : 7),
+          contentDrawY + badgeH / 2 + 0.5
+        );
+        contentDrawY += badgeH + (isClean16x9 ? 7 : 5);
+      }
+
       if (config.enableThoughtPill && item.msg.thoughtDuration?.trim()) {
         const thoughtLabel = `Thought for ${item.msg.thoughtDuration.trim()}`;
-        ctx.font = `500 12.5px ${INTER_FONT}`;
+        const thoughtFontSize = isClean16x9 ? 15 : 12.5;
+        ctx.font = `500 ${thoughtFontSize}px ${INTER_FONT}`;
         const tw = ctx.measureText(thoughtLabel).width;
-        const pillW = tw + 34;
-        const pillH = 26;
+        const pillW = tw + (isClean16x9 ? 40 : 34);
+        const pillH = isClean16x9 ? 32 : 26;
         ctx.fillStyle = palette.thoughtBg;
-        roundedRectPath(ctx, mdX, contentDrawY, pillW, pillH, 8);
+        roundedRectPath(ctx, mdX, contentDrawY, pillW, pillH, 9);
         ctx.fill();
         ctx.strokeStyle = palette.thoughtBorder;
         ctx.lineWidth = 1;
@@ -2022,12 +2314,19 @@ export function renderChatFrameToCanvas(
 
         ctx.fillStyle = palette.thoughtText;
         ctx.textBaseline = 'middle';
-        ctx.fillText(thoughtLabel, mdX + 10, contentDrawY + pillH / 2 + 0.5);
+        ctx.fillText(
+          thoughtLabel,
+          mdX + (isClean16x9 ? 12 : 10),
+          contentDrawY + pillH / 2 + 0.5
+        );
 
-        // Chevron right >
         ctx.save();
-        ctx.translate(mdX + 10 + tw + 6, contentDrawY + pillH / 2 - 5);
-        ctx.scale(10 / 24, 10 / 24);
+        ctx.translate(
+          mdX + (isClean16x9 ? 12 : 10) + tw + 6,
+          contentDrawY + pillH / 2 - (isClean16x9 ? 6 : 5)
+        );
+        const chevScale = isClean16x9 ? 12 / 24 : 10 / 24;
+        ctx.scale(chevScale, chevScale);
         ctx.strokeStyle = palette.thoughtText;
         ctx.lineWidth = 2.4;
         ctx.lineCap = 'round';
@@ -2039,7 +2338,7 @@ export function renderChatFrameToCanvas(
         ctx.stroke();
         ctx.restore();
 
-        contentDrawY += 36;
+        contentDrawY += pillH + (isClean16x9 ? 12 : 10);
       }
 
       const res = processMarkdownBlock(
@@ -2049,8 +2348,9 @@ export function renderChatFrameToCanvas(
         contentDrawY,
         mdW,
         palette,
-        bodyFont,
-        true
+        getBodyFontFamily(effectiveSender),
+        true,
+        textScale
       );
 
       if (item.msg.isStreaming) {
@@ -2060,36 +2360,49 @@ export function renderChatFrameToCanvas(
         ctx.save();
         ctx.globalAlpha = pulse;
         ctx.fillStyle =
-          config.skin === 'claude' ? '#d97757' : res.cursorColor;
+          effectiveSender === 'claude' ? '#d97757' : res.cursorColor;
         ctx.beginPath();
-        ctx.arc(res.cursorX + 9, res.cursorY, 4, 0, Math.PI * 2);
+        ctx.arc(res.cursorX + (isClean16x9 ? 11 : 9), res.cursorY, isClean16x9 ? 5 : 4, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       } else {
         drawSkinActionIconsRow(
           ctx,
-          config.skin,
+          effectiveSender,
           mdX,
-          contentDrawY + res.height + 10,
-          palette.textMuted
+          contentDrawY + res.height + (isClean16x9 ? 12 : 10),
+          palette.textMuted,
+          isClean16x9 ? 19 : 15,
+          isClean16x9 ? 34 : 27
         );
       }
     } else if (item.kind === 'thinking') {
-      drawAiAvatar(ctx, config.skin, bodyX, drawY, palette);
-      const avatarGap = isMobile ? 12 : 16;
+      const thinkingSkin: MessageSenderSkin =
+        config.skin === 'multi' ? 'chatgpt' : config.skin;
+      drawAiAvatar(
+        ctx,
+        thinkingSkin,
+        bodyX,
+        drawY,
+        palette,
+        undefined,
+        undefined,
+        avatarSize
+      );
       const pulse =
         0.28 +
         0.72 * (0.5 + 0.5 * Math.cos((frame.timeMs / 1000) * Math.PI * 2));
       const dotScale = 0.84 + 0.16 * pulse;
+      const dotRadius = isClean16x9 ? 7 : 5.5;
       ctx.save();
       ctx.globalAlpha = pulse;
       ctx.fillStyle =
-        config.skin === 'claude' ? '#d97757' : palette.textPrimary;
+        thinkingSkin === 'claude' ? '#d97757' : palette.textPrimary;
       ctx.beginPath();
       ctx.arc(
-        bodyX + 28 + avatarGap + 5.5,
-        drawY + 14,
-        5.5 * dotScale,
+        bodyX + avatarSize + avatarGap + dotRadius,
+        drawY + avatarSize / 2,
+        dotRadius * dotScale,
         0,
         Math.PI * 2
       );
@@ -2100,108 +2413,119 @@ export function renderChatFrameToCanvas(
 
   ctx.restore(); // End feed clip
 
-  // Draw Sticky Top Chrome (Background + optional iOS Bar + Skin Top Header)
-  ctx.fillStyle = palette.canvasBg;
-  ctx.fillRect(0, 0, logicalWidth, topChromeH);
+  // Draw Sticky Top Chrome (Optional Header)
+  if (config.showHeader) {
+    ctx.fillStyle = palette.canvasBg;
+    ctx.fillRect(chatAreaX, 0, chatAreaW, topChromeH);
 
-  if (isMobile && config.showIosStatusBar) {
-    drawIosStatusBar(ctx, logicalWidth, palette.textPrimary);
-  }
+    if (isMobile && config.showIosStatusBar) {
+      drawIosStatusBar(ctx, logicalWidth, palette.textPrimary);
+    }
 
-  const headerTop = statusH;
-  const headerCenterY = headerTop + headerH / 2;
+    const headerTop = statusH;
+    const headerCenterY = headerTop + headerH / 2;
 
-  if (config.skin === 'claude') {
-    drawSidebarToggleIcon(ctx, 18, headerCenterY - 10, palette.textSecondary);
-    const modelX = 52;
-    ctx.font = `500 17px ${CLAUDE_SERIF_FONT}`;
-    const labelW = ctx.measureText(displayModel).width;
-    ctx.fillStyle = palette.textPrimary;
-    ctx.textBaseline = 'middle';
-    ctx.fillText(displayModel, modelX, headerCenterY);
-    drawChevronDown(ctx, modelX + labelW + 5, headerCenterY - 7, 15, palette.textMuted);
-
-    drawStarIcon(ctx, logicalWidth - 62, headerCenterY - 8.5, 17, palette.textSecondary);
-    drawShareIcon(ctx, logicalWidth - 34, headerCenterY - 8.5, 17, palette.textSecondary);
-  } else if (config.skin === 'gemini') {
-    drawHamburgerIcon(ctx, 18, headerCenterY - 10, palette.textSecondary);
-    const gemX = 50;
-    ctx.font = `500 18px ${INTER_FONT}`;
-    ctx.fillStyle = palette.textPrimary;
-    ctx.textBaseline = 'middle';
-    ctx.fillText('Gemini', gemX, headerCenterY);
-    const gemW = ctx.measureText('Gemini').width;
-
-    // 3 Pro ▾ pill badge
-    ctx.font = `500 12px ${INTER_FONT}`;
-    const pillLabelW = ctx.measureText(displayModel).width;
-    const pillX = gemX + gemW + 8;
-    const pillW = pillLabelW + 24;
-    const pillH = 22;
-    ctx.fillStyle = palette.pillBg;
-    roundedRectPath(ctx, pillX, headerCenterY - pillH / 2, pillW, pillH, 999);
-    ctx.fill();
-    ctx.fillStyle = palette.textSecondary;
-    ctx.fillText(displayModel, pillX + 9, headerCenterY + 0.5);
-    drawChevronDown(ctx, pillX + 9 + pillLabelW + 2, headerCenterY - 6, 12, palette.textMuted);
-
-    // User initial circle top-right
-    ctx.fillStyle = '#1a73e8';
-    ctx.beginPath();
-    ctx.arc(logicalWidth - 28, headerCenterY, 13, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.font = `600 12px ${INTER_FONT}`;
-    ctx.textAlign = 'center';
-    ctx.fillText('A', logicalWidth - 28, headerCenterY + 0.5);
-    ctx.textAlign = 'left';
-  } else if (config.skin === 'grok') {
-    ctx.strokeStyle = palette.hrBg;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, topChromeH - 0.5);
-    ctx.lineTo(logicalWidth, topChromeH - 0.5);
-    ctx.stroke();
-
-    ctx.font = `600 17px ${INTER_FONT}`;
-    const labelW = ctx.measureText(displayModel).width;
-    ctx.fillStyle = palette.textPrimary;
-    ctx.textBaseline = 'middle';
-    ctx.fillText(displayModel, 18, headerCenterY);
-    drawChevronDown(ctx, 18 + labelW + 5, headerCenterY - 7, 15, palette.textMuted);
-
-    drawGhostIcon(ctx, logicalWidth - 68, headerCenterY - 9.5, 19, palette.textSecondary);
-    drawNewChatIcon(ctx, logicalWidth - 38, headerCenterY - 9.5, 19, palette.textSecondary);
-  } else {
-    // ChatGPT
-    if (isMobile) {
-      drawHamburgerIcon(ctx, 16, headerCenterY - 10, palette.textSecondary);
-      ctx.font = `600 16px ${INTER_FONT}`;
-      const labelW = ctx.measureText(displayModel).width;
-      const totalW = labelW + 4 + 15;
-      const labelStartX = (logicalWidth - totalW) / 2;
-      ctx.fillStyle = palette.textPrimary;
-      ctx.textBaseline = 'middle';
-      ctx.fillText(displayModel, labelStartX, headerCenterY);
-      drawChevronDown(ctx, labelStartX + labelW + 4, headerCenterY - 7, 15, palette.textMuted);
-      drawNewChatIcon(ctx, logicalWidth - 35, headerCenterY - 9.5, 19, palette.textSecondary);
-    } else {
-      drawSidebarToggleIcon(ctx, 18, headerCenterY - 10, palette.textSecondary);
-      const modelX = 52;
-      ctx.font = `600 17px ${INTER_FONT}`;
+    if (config.skin === 'claude') {
+      if (!config.showSidebar) {
+        drawSidebarToggleIcon(ctx, chatAreaX + 18, headerCenterY - 10, palette.textSecondary);
+      }
+      const modelX = chatAreaX + (config.showSidebar ? 20 : 52);
+      ctx.font = `500 17px ${CLAUDE_SERIF_FONT}`;
       const labelW = ctx.measureText(displayModel).width;
       ctx.fillStyle = palette.textPrimary;
       ctx.textBaseline = 'middle';
       ctx.fillText(displayModel, modelX, headerCenterY);
-      drawChevronDown(ctx, modelX + labelW + 5, headerCenterY - 7, 16, palette.textMuted);
-      drawNewChatIcon(ctx, logicalWidth - 38, headerCenterY - 10, 20, palette.textSecondary);
+      drawChevronDown(ctx, modelX + labelW + 5, headerCenterY - 7, 15, palette.textMuted);
+
+      drawStarIcon(ctx, logicalWidth - 62, headerCenterY - 8.5, 17, palette.textSecondary);
+      drawShareIcon(ctx, logicalWidth - 34, headerCenterY - 8.5, 17, palette.textSecondary);
+    } else if (config.skin === 'gemini') {
+      if (!config.showSidebar) {
+        drawHamburgerIcon(ctx, chatAreaX + 18, headerCenterY - 10, palette.textSecondary);
+      }
+      const gemX = chatAreaX + (config.showSidebar ? 20 : 50);
+      ctx.font = `500 18px ${INTER_FONT}`;
+      ctx.fillStyle = palette.textPrimary;
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Gemini', gemX, headerCenterY);
+      const gemW = ctx.measureText('Gemini').width;
+
+      ctx.font = `500 12px ${INTER_FONT}`;
+      const pillLabelW = ctx.measureText(displayModel).width;
+      const pillX = gemX + gemW + 8;
+      const pillW = pillLabelW + 24;
+      const pillH = 22;
+      ctx.fillStyle = palette.pillBg;
+      roundedRectPath(ctx, pillX, headerCenterY - pillH / 2, pillW, pillH, 999);
+      ctx.fill();
+      ctx.fillStyle = palette.textSecondary;
+      ctx.fillText(displayModel, pillX + 9, headerCenterY + 0.5);
+      drawChevronDown(ctx, pillX + 9 + pillLabelW + 2, headerCenterY - 6, 12, palette.textMuted);
+
+      ctx.fillStyle = '#1a73e8';
+      ctx.beginPath();
+      ctx.arc(logicalWidth - 28, headerCenterY, 13, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `600 12px ${INTER_FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillText('A', logicalWidth - 28, headerCenterY + 0.5);
+      ctx.textAlign = 'left';
+    } else if (config.skin === 'grok') {
+      ctx.strokeStyle = palette.hrBg;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(chatAreaX, topChromeH - 0.5);
+      ctx.lineTo(logicalWidth, topChromeH - 0.5);
+      ctx.stroke();
+
+      ctx.font = `600 17px ${INTER_FONT}`;
+      const labelW = ctx.measureText(displayModel).width;
+      ctx.fillStyle = palette.textPrimary;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(displayModel, chatAreaX + 18, headerCenterY);
+      drawChevronDown(ctx, chatAreaX + 18 + labelW + 5, headerCenterY - 7, 15, palette.textMuted);
+
+      drawGhostIcon(ctx, logicalWidth - 68, headerCenterY - 9.5, 19, palette.textSecondary);
+      drawNewChatIcon(ctx, logicalWidth - 38, headerCenterY - 9.5, 19, palette.textSecondary);
+    } else {
+      // ChatGPT or Multi-AI
+      if (isMobile) {
+        drawHamburgerIcon(ctx, 16, headerCenterY - 10, palette.textSecondary);
+        ctx.font = `600 16px ${INTER_FONT}`;
+        const labelW = ctx.measureText(displayModel).width;
+        const totalW = labelW + 4 + 15;
+        const labelStartX = (logicalWidth - totalW) / 2;
+        ctx.fillStyle = palette.textPrimary;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(displayModel, labelStartX, headerCenterY);
+        drawChevronDown(ctx, labelStartX + labelW + 4, headerCenterY - 7, 15, palette.textMuted);
+        drawNewChatIcon(ctx, logicalWidth - 35, headerCenterY - 9.5, 19, palette.textSecondary);
+      } else {
+        if (!config.showSidebar) {
+          drawSidebarToggleIcon(ctx, chatAreaX + 18, headerCenterY - 10, palette.textSecondary);
+        }
+        const modelX = chatAreaX + (config.showSidebar ? 20 : 52);
+        ctx.font = `600 17px ${INTER_FONT}`;
+        const labelW = ctx.measureText(displayModel).width;
+        ctx.fillStyle = palette.textPrimary;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(displayModel, modelX, headerCenterY);
+        drawChevronDown(ctx, modelX + labelW + 5, headerCenterY - 7, 16, palette.textMuted);
+        drawNewChatIcon(ctx, logicalWidth - 38, headerCenterY - 10, 20, palette.textSecondary);
+      }
     }
   }
 
   // Draw Sticky Bottom Chrome (Composer Bar + Optional Footer Disclaimer)
   if (config.showBottomBar || config.showFooterDisclaimer) {
     ctx.fillStyle = palette.canvasBg;
-    ctx.fillRect(0, logicalHeight - bottomChromeH - 4, logicalWidth, bottomChromeH + 4);
+    ctx.fillRect(
+      chatAreaX,
+      logicalHeight - bottomChromeH - 4,
+      chatAreaW,
+      bottomChromeH + 4
+    );
   }
 
   if (config.showBottomBar) {
@@ -2216,7 +2540,7 @@ export function renderChatFrameToCanvas(
       composerTop,
       composerOuterW,
       composerBoxH,
-      isTwoRowComposer ? 18 : 26
+      isTwoRowComposer ? 18 : isClean16x9 ? 32 : 26
     );
     ctx.fill();
     ctx.strokeStyle = palette.composerBorder;
@@ -2235,7 +2559,7 @@ export function renderChatFrameToCanvas(
         });
       } else {
         ctx.fillStyle = palette.textMuted;
-        ctx.fillText(skinMeta.composerPlaceholder, textX, topTextY + 11);
+        ctx.fillText(composerPlaceholderText, textX, topTextY + 11);
       }
 
       const bottomRowY = composerTop + composerBoxH - 22;
@@ -2243,7 +2567,6 @@ export function renderChatFrameToCanvas(
       if (config.skin === 'claude') {
         drawPlusIcon(ctx, composerLeft + 14, bottomRowY - 8.5, 17, palette.textSecondary);
 
-        // Model pill + terracotta send button on bottom-right
         ctx.font = `500 12px ${INTER_FONT}`;
         const pillW = ctx.measureText(displayModel).width + 24;
         const sendX = composerLeft + composerOuterW - 26;
@@ -2272,7 +2595,6 @@ export function renderChatFrameToCanvas(
         drawSendArrowIcon(ctx, -7.5, -7.5, palette.sendBtnFg);
         ctx.restore();
       } else {
-        // Grok: DeepSearch & Think pills bottom-left, monochrome send bottom-right
         ctx.font = `500 11.5px ${INTER_FONT}`;
         const drawPill = (px: number, label: string) => {
           const w = ctx.measureText(label).width + 20;
@@ -2307,37 +2629,67 @@ export function renderChatFrameToCanvas(
         ctx.restore();
       }
     } else {
-      // Single-row pill (ChatGPT / Gemini)
-      const leftPad = isMobile ? 14 : 16;
-      const rightPad = isMobile ? 10 : 12;
+      const leftPad = isClean16x9 ? 20 : isMobile ? 14 : 16;
+      const rightPad = isClean16x9 ? 14 : isMobile ? 10 : 12;
+      const compIconSize = isClean16x9 ? 23 : 18;
+      const sendRadius = isClean16x9 ? 19 : 15;
+      const sendArrowSize = isClean16x9 ? 19 : 15;
       const barCenterY = composerTop + composerBoxH / 2;
 
       if (config.skin === 'gemini') {
-        drawPlusIcon(ctx, composerLeft + leftPad, barCenterY - 9, 18, palette.textSecondary);
+        drawPlusIcon(
+          ctx,
+          composerLeft + leftPad,
+          barCenterY - compIconSize / 2,
+          compIconSize,
+          palette.textSecondary
+        );
       } else {
-        drawPaperclipIcon(ctx, composerLeft + leftPad, barCenterY - 9, palette.textSecondary);
+        drawPaperclipIcon(
+          ctx,
+          composerLeft + leftPad,
+          barCenterY - compIconSize / 2,
+          palette.textSecondary,
+          compIconSize
+        );
       }
 
-      const textX = composerLeft + leftPad + 28;
-      ctx.font = `400 15px ${INTER_FONT}`;
+      const textX = composerLeft + leftPad + compIconSize + (isClean16x9 ? 14 : 10);
+      ctx.font = `400 ${composerFontSize}px ${INTER_FONT}`;
       ctx.textBaseline = 'middle';
       if (frame.composerDraft) {
         ctx.fillStyle = palette.textPrimary;
-        const topTextY = composerTop + (isMobile ? 9 : 11);
+        const topTextY = composerTop + (isClean16x9 ? 14 : isMobile ? 9 : 11);
         composerLines.forEach((line, li) => {
-          ctx.fillText(line, textX, topTextY + li * 22 + 11);
+          ctx.fillText(
+            line,
+            textX,
+            topTextY + li * composerLineH + composerLineH / 2
+          );
         });
       } else {
         ctx.fillStyle = palette.textMuted;
-        ctx.fillText(skinMeta.composerPlaceholder, textX, barCenterY);
+        ctx.fillText(composerPlaceholderText, textX, barCenterY);
       }
 
-      const sendBtnX = composerLeft + composerOuterW - rightPad - 15;
-      const voiceX = sendBtnX - 15 - 8 - 22;
+      const sendBtnX = composerLeft + composerOuterW - rightPad - sendRadius;
+      const voiceX = sendBtnX - sendRadius - (isClean16x9 ? 12 : 8) - compIconSize - 4;
       if (config.skin === 'gemini') {
-        drawMicIcon(ctx, voiceX, barCenterY - 9, palette.textSecondary);
+        drawMicIcon(
+          ctx,
+          voiceX,
+          barCenterY - compIconSize / 2,
+          palette.textSecondary,
+          compIconSize
+        );
       } else {
-        drawVoiceWaveformIcon(ctx, voiceX, barCenterY - 9, palette.textSecondary);
+        drawVoiceWaveformIcon(
+          ctx,
+          voiceX,
+          barCenterY - compIconSize / 2,
+          palette.textSecondary,
+          compIconSize
+        );
       }
 
       const sendScale = frame.sendHighlighted ? 1.12 : 1;
@@ -2346,19 +2698,20 @@ export function renderChatFrameToCanvas(
       ctx.scale(sendScale, sendScale);
       if (frame.sendHighlighted) {
         ctx.beginPath();
-        ctx.arc(0, 0, 19, 0, Math.PI * 2);
+        ctx.arc(0, 0, sendRadius + 4, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(16, 163, 127, 0.25)';
         ctx.fill();
       }
       ctx.beginPath();
-      ctx.arc(0, 0, 15, 0, Math.PI * 2);
+      ctx.arc(0, 0, sendRadius, 0, Math.PI * 2);
       ctx.fillStyle = frame.sendHighlighted ? '#10a37f' : palette.sendBtnBg;
       ctx.fill();
       drawSendArrowIcon(
         ctx,
-        -7.5,
-        -7.5,
-        frame.sendHighlighted ? '#ffffff' : palette.sendBtnFg
+        -sendArrowSize / 2,
+        -sendArrowSize / 2,
+        frame.sendHighlighted ? '#ffffff' : palette.sendBtnFg,
+        sendArrowSize
       );
       ctx.restore();
     }
@@ -2369,15 +2722,20 @@ export function renderChatFrameToCanvas(
   if (config.showFooterDisclaimer) {
     ctx.save();
     ctx.fillStyle = palette.textMuted;
-    ctx.font = `400 11.5px ${INTER_FONT}`;
+    ctx.font = `400 ${isClean16x9 ? 13.5 : 11.5}px ${INTER_FONT}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(
-      skinMeta.disclaimer,
-      logicalWidth / 2,
+      disclaimerText,
+      chatAreaX + chatAreaW / 2,
       logicalHeight - 13
     );
     ctx.restore();
+  }
+
+  // Draw Optional In-Frame Sidebar on top of full height on the left
+  if (sidebarW > 0) {
+    drawInFrameSidebar(ctx, sidebarW, logicalHeight, palette, config.skin);
   }
 
   ctx.restore();

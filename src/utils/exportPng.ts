@@ -30,6 +30,8 @@ export async function exportCleanImage(
     allowTaint: false,
     logging: false,
     backgroundColor: bgColor,
+    width: element.offsetWidth,
+    height: element.offsetHeight,
     scrollX: 0,
     scrollY: 0,
     onclone: (clonedDoc, clonedElement) => {

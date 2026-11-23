@@ -51,6 +51,11 @@
   overflow-wrap: break-word;
 }
 
+.chatgpt-markdown.clean16x9-markdown {
+  font-size: 20px;
+  line-height: 1.58;
+}
+
 .chatgpt-markdown > *:first-child {
   margin-top: 0 !important;
 }
@@ -62,6 +67,10 @@
 .chatgpt-markdown p {
   margin-top: 0;
   margin-bottom: 14px;
+}
+
+.chatgpt-markdown.clean16x9-markdown p {
+  margin-bottom: 16px;
 }
 
 .chatgpt-markdown h1,
@@ -84,6 +93,18 @@
 
 .chatgpt-markdown h3 {
   font-size: 1.05rem;
+}
+
+.chatgpt-markdown.clean16x9-markdown h1 {
+  font-size: 1.8rem;
+}
+
+.chatgpt-markdown.clean16x9-markdown h2 {
+  font-size: 1.55rem;
+}
+
+.chatgpt-markdown.clean16x9-markdown h3 {
+  font-size: 1.35rem;
 }
 
 .chatgpt-markdown strong,
@@ -220,6 +241,11 @@
   line-height: 1;
 }
 
+.chatgpt-markdown.clean16x9-markdown .chatgpt-code-header {
+  padding: 10px 18px;
+  font-size: 14px;
+}
+
 .chatgpt-code-lang {
   font-weight: 400;
   text-transform: lowercase;
@@ -236,6 +262,10 @@
   cursor: pointer;
 }
 
+.chatgpt-markdown.clean16x9-markdown .chatgpt-code-copy {
+  font-size: 14px;
+}
+
 .chatgpt-code-pre {
   margin: 0;
   padding: 14px 16px;
@@ -246,6 +276,12 @@
   font-size: 13px;
   line-height: 1.55;
   tab-size: 2;
+}
+
+.chatgpt-markdown.clean16x9-markdown .chatgpt-code-pre {
+  padding: 16px 20px;
+  font-size: 16.5px;
+  line-height: 1.55;
 }
 
 .chatgpt-code-pre code {
@@ -262,6 +298,10 @@
   border-collapse: collapse;
   margin: 14px 0;
   font-size: 14px;
+}
+
+.chatgpt-markdown.clean16x9-markdown table {
+  font-size: 17px;
 }
 
 .chatgpt-markdown th,
@@ -323,6 +363,12 @@
   animation: chatgpt-dot-pulse 0.85s ease-in-out infinite;
 }
 
+.chatgpt-markdown.clean16x9-markdown .chatgpt-stream-dot {
+  width: 10px;
+  height: 10px;
+  margin-left: 6px;
+}
+
 .chatgpt-thinking-dot {
   display: inline-block;
   width: 11px;
@@ -330,6 +376,11 @@
   border-radius: 9999px;
   background-color: currentColor;
   animation: chatgpt-dot-pulse 1s ease-in-out infinite;
+}
+
+.chatgpt-thinking-dot.clean16x9-dot {
+  width: 14px;
+  height: 14px;
 }
 
 .chatgpt-user-bubble-enter {

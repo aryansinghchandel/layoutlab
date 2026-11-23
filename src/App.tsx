@@ -4,9 +4,23 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Maximize2, Minimize2, Play, Square } from 'lucide-react';
+import {
+  ArrowLeft,
+  Download,
+  Maximize2,
+  Minimize2,
+  Play,
+  ShieldCheck,
+  Smartphone,
+  Square,
+  WifiOff,
+  X,
+} from 'lucide-react';
 import { LayoutLabLogo } from './components/ChatGptIcons';
-import { EditorPanel } from './components/EditorPanel';
+import {
+  EditorPanel,
+  type MessageSenderPatch,
+} from './components/EditorPanel';
 import { HomePage } from './components/HomePage';
 import { PreviewCanvas } from './components/PreviewCanvas';
 import {
@@ -14,11 +28,14 @@ import {
   type AnimationFormat,
   type ChatMessage,
   type DeviceMode,
+  getEffectivePlaybackMultiplier,
   type ImageFormat,
   INITIAL_MESSAGES,
   type MessageAttachment,
   type MessageRole,
+  MULTI_AI_SAMPLE_MESSAGES,
   type PlaybackSpeed,
+  type PreviewMode,
   type ThemeMode,
   type VideoQuality,
 } from './types';
@@ -27,26 +44,19 @@ import {
   type AnimationExportController,
   startNativeAnimationExport,
 } from './utils/exportVideo';
+import { buildAnimationTimeline } from './utils/nativeCanvasRenderer';
 import { AI_SKINS } from './utils/skins';
 import type { ScriptTemplate } from './utils/templates';
+import {
+  isOfflineStudioPath,
+  useOfflineStudio,
+} from './utils/useOfflineStudio';
 
 function createMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
   }
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function tokenizeWordsPreservingWhitespace(text: string): string[] {
-  const matches = text.match(/\s*\S+/g);
-  if (!matches) {
-    return text.length > 0 ? [text] : [];
-  }
-  const matchedLength = matches.reduce((sum, token) => sum + token.length, 0);
-  if (matchedLength < text.length) {
-    matches[matches.length - 1] += text.slice(matchedLength);
-  }
-  return matches;
 }
 
 function waitNextFrames(count = 2): Promise<void> {
@@ -63,12 +73,21 @@ function waitNextFrames(count = 2): Promise<void> {
 }
 
 export default function App() {
-  const [activeView, setActiveView] = useState<'home' | 'studio'>('home');
+  const [isOfflineRoute] = useState<boolean>(() => isOfflineStudioPath());
+  const offlineStudio = useOfflineStudio(isOfflineRoute);
+  const [installGuideOpen, setInstallGuideOpen] = useState<boolean>(false);
+
+  const [activeView, setActiveView] = useState<'home' | 'studio'>(() =>
+    isOfflineRoute ? 'studio' : 'home'
+  );
   const [isTheaterMode, setIsTheaterMode] = useState<boolean>(false);
   const [skin, setSkin] = useState<AiSkin>('chatgpt');
   const [modelLabel, setModelLabel] = useState<string>('ChatGPT');
   const [theme, setTheme] = useState<ThemeMode>('light');
   const [device, setDevice] = useState<DeviceMode>('desktop');
+  const [previewMode, setPreviewMode] = useState<PreviewMode>('standard');
+  const [showHeader, setShowHeader] = useState<boolean>(true);
+  const [showSidebar, setShowSidebar] = useState<boolean>(false);
   const [showIosStatusBar, setShowIosStatusBar] = useState<boolean>(true);
   const [showBottomBar, setShowBottomBar] = useState<boolean>(true);
   const [showFooterDisclaimer, setShowFooterDisclaimer] =
@@ -79,6 +98,8 @@ export default function App() {
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [exportProgress, setExportProgress] = useState<number>(0);
+  const [exportFrame, setExportFrame] = useState<number>(0);
+  const [exportTotalFrames, setExportTotalFrames] = useState<number>(0);
   const [exportError, setExportError] = useState<string | null>(null);
 
   // Live typing & streaming playback state
@@ -92,8 +113,14 @@ export default function App() {
 
   const captureRef = useRef<HTMLDivElement | null>(null);
   const playbackRunIdRef = useRef<number>(0);
+  const rafIdRef = useRef<number | null>(null);
   const speedRef = useRef<PlaybackSpeed>(1);
   const showBottomBarRef = useRef<boolean>(true);
+  const isPlayingRef = useRef<boolean>(false);
+  const isRecordingRef = useRef<boolean>(false);
+  const isExportingRef = useRef<boolean>(false);
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  const skinRef = useRef<AiSkin>(skin);
   const animationExportRef = useRef<AnimationExportController | null>(null);
 
   useEffect(() => {
@@ -104,6 +131,26 @@ export default function App() {
     showBottomBarRef.current = showBottomBar;
   }, [showBottomBar]);
 
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
+
+  useEffect(() => {
+    isExportingRef.current = isExporting;
+  }, [isExporting]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    skinRef.current = skin;
+  }, [skin]);
+
   const cancelActiveExport = useCallback(() => {
     if (animationExportRef.current) {
       animationExportRef.current.cancel();
@@ -111,10 +158,16 @@ export default function App() {
     }
     setIsRecording(false);
     setExportProgress(0);
+    setExportFrame(0);
+    setExportTotalFrames(0);
   }, []);
 
   const stopAnimation = useCallback(() => {
     playbackRunIdRef.current += 1;
+    if (rafIdRef.current !== null) {
+      window.cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
     cancelActiveExport();
     setIsPlaying(false);
     setIsThinking(false);
@@ -127,6 +180,10 @@ export default function App() {
   useEffect(() => {
     return () => {
       playbackRunIdRef.current += 1;
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
       if (animationExportRef.current) {
         animationExportRef.current.cancel();
         animationExportRef.current = null;
@@ -145,112 +202,192 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isTheaterMode]);
 
-  const handleSkinChange = (nextSkin: AiSkin) => {
-    if (isPlaying || isRecording) stopAnimation();
-    setSkin(nextSkin);
-    setModelLabel(AI_SKINS[nextSkin].defaultModel);
-  };
-
-  const sleepScaled = (baseMs: number, runId: number): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const delay = Math.max(8, Math.round(baseMs / speedRef.current));
-      window.setTimeout(() => {
-        resolve(playbackRunIdRef.current === runId);
-      }, delay);
-    });
-  };
-
-  const runAnimationSequence = async (
-    scriptSnapshot: ChatMessage[],
-    runId: number
-  ): Promise<boolean> => {
-    if (!(await sleepScaled(180, runId))) return false;
-
-    for (let i = 0; i < scriptSnapshot.length; i++) {
-      if (playbackRunIdRef.current !== runId) return false;
-      const msg = scriptSnapshot[i];
-
-      if (msg.role === 'user') {
-        if (showBottomBarRef.current) {
-          const chars = Array.from(msg.content);
-          for (let c = 1; c <= chars.length; c++) {
-            if (playbackRunIdRef.current !== runId) return false;
-            setComposerDraft(chars.slice(0, c).join(''));
-            if (!(await sleepScaled(22, runId))) return false;
-          }
-
-          if (!(await sleepScaled(140, runId))) return false;
-          setSendHighlighted(true);
-          if (!(await sleepScaled(220, runId))) return false;
-          setComposerDraft('');
-          setSendHighlighted(false);
-        }
-
-        setDisplayedMessages((prev) => [...prev, msg]);
-        if (!(await sleepScaled(280, runId))) return false;
-      } else {
-        setIsThinking(true);
-        if (!(await sleepScaled(1000, runId))) return false;
-        setIsThinking(false);
-
-        const words = tokenizeWordsPreservingWhitespace(msg.content);
-        setDisplayedMessages((prev) => [...prev, { ...msg, content: '' }]);
-        setStreamingMessageId(msg.id);
-
-        for (let w = 0; w < words.length; w++) {
-          if (playbackRunIdRef.current !== runId) return false;
-          const partial = words.slice(0, w + 1).join('');
-          setDisplayedMessages((prev) =>
-            prev.map((item) =>
-              item.id === msg.id ? { ...item, content: partial } : item
-            )
-          );
-          if (!(await sleepScaled(45, runId))) return false;
-        }
-
-        setStreamingMessageId(null);
-        if (!(await sleepScaled(420, runId))) return false;
+  useEffect(() => {
+    if (!installGuideOpen) return;
+    const handleKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        setInstallGuideOpen(false);
       }
-    }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [installGuideOpen]);
 
-    return playbackRunIdRef.current === runId;
-  };
+  const handleSkinChange = useCallback(
+    (nextSkin: AiSkin) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      setSkin(nextSkin);
+      setModelLabel(AI_SKINS[nextSkin].defaultModel);
+      if (nextSkin === 'multi' && messagesRef.current === INITIAL_MESSAGES) {
+        setMessages(MULTI_AI_SAMPLE_MESSAGES);
+      } else if (
+        nextSkin !== 'multi' &&
+        messagesRef.current === MULTI_AI_SAMPLE_MESSAGES
+      ) {
+        setMessages(INITIAL_MESSAGES);
+      }
+    },
+    [stopAnimation]
+  );
 
-  const startAnimation = async (overrideMessages?: ChatMessage[]) => {
-    const sourceMessages = overrideMessages ?? messages;
-    if (sourceMessages.length === 0 || isRecording) {
-      return;
-    }
+  const handleModelLabelChange = useCallback(
+    (value: string) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      setModelLabel(value);
+    },
+    [stopAnimation]
+  );
 
-    const scriptSnapshot = sourceMessages.map((m) => ({ ...m }));
-    const runId = playbackRunIdRef.current + 1;
-    playbackRunIdRef.current = runId;
+  const handlePreviewModeChange = useCallback(
+    (nextMode: PreviewMode) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      setPreviewMode(nextMode);
+      if (nextMode === 'clean16x9') {
+        setShowHeader(false);
+        setShowSidebar(false);
+        setShowFooterDisclaimer(false);
+        setShowBottomBar(true);
+      } else {
+        setShowHeader(true);
+        setShowSidebar(false);
+        setShowFooterDisclaimer(true);
+        setShowBottomBar(true);
+      }
+    },
+    [stopAnimation]
+  );
 
-    setIsPlaying(true);
-    setDisplayedMessages([]);
-    setIsThinking(false);
-    setStreamingMessageId(null);
-    setComposerDraft('');
-    setSendHighlighted(false);
+  const startAnimation = useCallback(
+    (overrideMessages?: ChatMessage[]) => {
+      const sourceMessages = overrideMessages ?? messagesRef.current;
+      if (sourceMessages.length === 0 || isRecordingRef.current) {
+        return;
+      }
 
-    const completed = await runAnimationSequence(scriptSnapshot, runId);
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
 
-    if (completed && playbackRunIdRef.current === runId) {
-      setIsPlaying(false);
+      const scriptSnapshot = sourceMessages.map((m) => ({ ...m }));
+      const runId = playbackRunIdRef.current + 1;
+      playbackRunIdRef.current = runId;
+
+      // Build unit-speed timeline (speed 1.5 === 1.0x unit rate) and advance via rAF timestamp accumulator
+      const timeline = buildAnimationTimeline(
+        scriptSnapshot,
+        1.5,
+        showBottomBarRef.current,
+        { includeFinalHold: false }
+      );
+
+      setIsPlaying(true);
+      setDisplayedMessages([]);
       setIsThinking(false);
       setStreamingMessageId(null);
       setComposerDraft('');
       setSendHighlighted(false);
-    }
-  };
 
-  const handleTogglePlayback = () => {
-    if (isPlaying) {
+      let prevTs: number | null = null;
+      let accumulatedUnitMs = 0;
+      let lastSignature = '';
+      let prevRenderedMessages: ChatMessage[] = [];
+
+      const tick = (now: number) => {
+        if (playbackRunIdRef.current !== runId) {
+          rafIdRef.current = null;
+          return;
+        }
+
+        const rawDelta = prevTs === null ? 0 : Math.max(0, now - prevTs);
+        prevTs = now;
+        // Clamp frame delta to 28ms (even at 2x speed = 1.5x unit rate -> <=42ms < 45ms/word, zero skipped words)
+        const safeDelta = Math.min(rawDelta, 28);
+        accumulatedUnitMs +=
+          safeDelta * getEffectivePlaybackMultiplier(speedRef.current);
+
+        const frame = timeline.evaluateAt(accumulatedUnitMs);
+        let nextStreamingId: string | null = null;
+        for (let i = 0; i < frame.messages.length; i++) {
+          if (frame.messages[i].isStreaming) {
+            nextStreamingId = frame.messages[i].id;
+            break;
+          }
+        }
+
+        const lastMsg = frame.messages[frame.messages.length - 1];
+        const sig = `${frame.messages.length}|${lastMsg?.id ?? ''}|${
+          lastMsg?.content.length ?? 0
+        }|${nextStreamingId ?? ''}|${frame.isThinking ? 1 : 0}|${
+          frame.composerDraft.length
+        }|${frame.sendHighlighted ? 1 : 0}`;
+
+        if (sig !== lastSignature) {
+          lastSignature = sig;
+
+          // Preserve object identity for unchanged completed messages so React.memo skips them
+          const nextMessages: ChatMessage[] = frame.messages.map((fm, idx) => {
+            const existing = prevRenderedMessages[idx];
+            if (
+              existing &&
+              existing.id === fm.id &&
+              existing.role === fm.role &&
+              existing.content === fm.content &&
+              existing.thoughtDuration === fm.thoughtDuration &&
+              existing.attachment === fm.attachment &&
+              existing.senderSkin === fm.senderSkin &&
+              existing.customSenderName === fm.customSenderName &&
+              existing.customSenderColor === fm.customSenderColor &&
+              existing.customSenderIcon === fm.customSenderIcon
+            ) {
+              return existing;
+            }
+            return {
+              id: fm.id,
+              role: fm.role,
+              content: fm.content,
+              thoughtDuration: fm.thoughtDuration,
+              attachment: fm.attachment,
+              senderSkin: fm.senderSkin,
+              customSenderName: fm.customSenderName,
+              customSenderColor: fm.customSenderColor,
+              customSenderIcon: fm.customSenderIcon,
+            };
+          });
+
+          prevRenderedMessages = nextMessages;
+          setDisplayedMessages(nextMessages);
+          setIsThinking(frame.isThinking);
+          setStreamingMessageId(nextStreamingId);
+          setComposerDraft(frame.composerDraft);
+          setSendHighlighted(frame.sendHighlighted);
+        }
+
+        if (accumulatedUnitMs >= timeline.totalDurationMs) {
+          rafIdRef.current = null;
+          setIsPlaying(false);
+          setIsThinking(false);
+          setStreamingMessageId(null);
+          setComposerDraft('');
+          setSendHighlighted(false);
+          return;
+        }
+
+        rafIdRef.current = window.requestAnimationFrame(tick);
+      };
+
+      rafIdRef.current = window.requestAnimationFrame(tick);
+    },
+    []
+  );
+
+  const handleTogglePlayback = useCallback(() => {
+    if (isPlayingRef.current) {
       stopAnimation();
     } else {
-      void startAnimation();
+      startAnimation();
     }
-  };
+  }, [startAnimation, stopAnimation]);
 
   const handleLaunchStudio = (targetSkin?: AiSkin) => {
     if (isPlaying || isRecording) stopAnimation();
@@ -284,163 +421,283 @@ export default function App() {
     setActiveView('studio');
     window.scrollTo({ top: 0 });
     window.setTimeout(() => {
-      void startAnimation(hydrated);
+      startAnimation(hydrated);
     }, 60);
   };
 
-  const handleAddMessage = (role: MessageRole) => {
-    if (isPlaying || isRecording) stopAnimation();
-    const newMessage: ChatMessage = {
-      id: createMessageId(),
-      role,
-      thoughtDuration: role === 'assistant' ? '4s' : undefined,
-      attachment: null,
-      content:
-        role === 'user'
-          ? 'How can I optimize this further?'
-          : 'Here are two clean improvements you can apply right away:\n\n- **Memoize expensive selectors** so child components avoid unnecessary renders.\n- **Batch state updates** inside event handlers for smoother UI responsiveness.',
-    };
-    setMessages((prev) => [...prev, newMessage]);
-  };
+  const handleAddMessage = useCallback(
+    (role: MessageRole) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      const currentSkin = skinRef.current;
+      const newMessage: ChatMessage = {
+        id: createMessageId(),
+        role,
+        senderSkin:
+          role === 'assistant'
+            ? currentSkin === 'multi'
+              ? 'chatgpt'
+              : currentSkin
+            : undefined,
+        thoughtDuration: role === 'assistant' ? '4s' : undefined,
+        attachment: null,
+        content:
+          role === 'user'
+            ? 'How can I optimize this further?'
+            : 'Here are two clean improvements you can apply right away:\n\n- **Memoize expensive selectors** so child components avoid unnecessary renders.\n- **Batch state updates** inside event handlers for smoother UI responsiveness.',
+      };
+      setMessages((prev) => [...prev, newMessage]);
+    },
+    [stopAnimation]
+  );
 
-  const handleUpdateMessage = (id: string, content: string) => {
-    if (isPlaying || isRecording) stopAnimation();
-    setMessages((prev) =>
-      prev.map((msg) => (msg.id === id ? { ...msg, content } : msg))
-    );
-  };
+  const handleUpdateMessage = useCallback(
+    (id: string, content: string) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      setMessages((prev) =>
+        prev.map((msg) => (msg.id === id ? { ...msg, content } : msg))
+      );
+    },
+    [stopAnimation]
+  );
 
-  const handleUpdateMessageThought = (id: string, thoughtDuration: string) => {
-    if (isPlaying || isRecording) stopAnimation();
-    setMessages((prev) =>
-      prev.map((msg) => (msg.id === id ? { ...msg, thoughtDuration } : msg))
-    );
-  };
+  const handleUpdateMessageThought = useCallback(
+    (id: string, thoughtDuration: string) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      setMessages((prev) =>
+        prev.map((msg) => (msg.id === id ? { ...msg, thoughtDuration } : msg))
+      );
+    },
+    [stopAnimation]
+  );
 
-  const handleUpdateMessageAttachment = (
-    id: string,
-    attachment: MessageAttachment | null
-  ) => {
-    if (isPlaying || isRecording) stopAnimation();
-    setMessages((prev) =>
-      prev.map((msg) => (msg.id === id ? { ...msg, attachment } : msg))
-    );
-  };
+  const handleUpdateMessageAttachment = useCallback(
+    (id: string, attachment: MessageAttachment | null) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      setMessages((prev) =>
+        prev.map((msg) => (msg.id === id ? { ...msg, attachment } : msg))
+      );
+    },
+    [stopAnimation]
+  );
 
-  const handleToggleRole = (id: string) => {
-    if (isPlaying || isRecording) stopAnimation();
-    setMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === id
-          ? { ...msg, role: msg.role === 'user' ? 'assistant' : 'user' }
-          : msg
-      )
-    );
-  };
+  const handleUpdateMessageSender = useCallback(
+    (id: string, patch: MessageSenderPatch) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      setMessages((prev) =>
+        prev.map((msg) => (msg.id === id ? { ...msg, ...patch } : msg))
+      );
+    },
+    [stopAnimation]
+  );
 
-  const handleMoveMessage = (index: number, direction: 'up' | 'down') => {
-    if (isPlaying || isRecording) stopAnimation();
-    setMessages((prev) => {
-      const targetIndex = direction === 'up' ? index - 1 : index + 1;
-      if (targetIndex < 0 || targetIndex >= prev.length) {
-        return prev;
-      }
-      const next = [...prev];
-      const [moved] = next.splice(index, 1);
-      next.splice(targetIndex, 0, moved);
-      return next;
-    });
-  };
+  const handleToggleRole = useCallback(
+    (id: string) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      const currentSkin = skinRef.current;
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === id
+            ? {
+                ...msg,
+                role: msg.role === 'user' ? 'assistant' : 'user',
+                senderSkin:
+                  msg.role === 'user'
+                    ? msg.senderSkin ??
+                      (currentSkin === 'multi' ? 'chatgpt' : currentSkin)
+                    : msg.senderSkin,
+              }
+            : msg
+        )
+      );
+    },
+    [stopAnimation]
+  );
 
-  const handleDeleteMessage = (id: string) => {
-    if (isPlaying || isRecording) stopAnimation();
-    setMessages((prev) => prev.filter((msg) => msg.id !== id));
-  };
+  const handleMoveMessage = useCallback(
+    (index: number, direction: 'up' | 'down') => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      setMessages((prev) => {
+        const targetIndex = direction === 'up' ? index - 1 : index + 1;
+        if (targetIndex < 0 || targetIndex >= prev.length) {
+          return prev;
+        }
+        const next = [...prev];
+        const [moved] = next.splice(index, 1);
+        next.splice(targetIndex, 0, moved);
+        return next;
+      });
+    },
+    [stopAnimation]
+  );
 
-  const handleClearAll = () => {
-    if (isPlaying || isRecording) stopAnimation();
+  const handleDeleteMessage = useCallback(
+    (id: string) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      setMessages((prev) => prev.filter((msg) => msg.id !== id));
+    },
+    [stopAnimation]
+  );
+
+  const handleClearAll = useCallback(() => {
+    if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
     setMessages([]);
-  };
+  }, [stopAnimation]);
 
-  const handleLoadSample = () => {
-    if (isPlaying || isRecording) stopAnimation();
-    setMessages(INITIAL_MESSAGES);
-  };
+  const handleLoadSample = useCallback(() => {
+    if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+    setMessages(
+      skinRef.current === 'multi' ? MULTI_AI_SAMPLE_MESSAGES : INITIAL_MESSAGES
+    );
+  }, [stopAnimation]);
 
   // Dropdown 1: Download Image (PNG / JPG / WEBP of final frame)
-  const handleExportImage = async (format: ImageFormat) => {
-    if (!captureRef.current || isExporting || isRecording) {
-      return;
-    }
-    setExportError(null);
-
-    if (isPlaying) {
-      stopAnimation();
-      await waitNextFrames(3);
-    }
-
-    if (!captureRef.current) return;
-
-    setIsExporting(true);
-    try {
-      await exportCleanImage(captureRef.current, theme, device, format, skin);
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Unable to export image.';
-      setExportError(message);
-    } finally {
-      setIsExporting(false);
-    }
-  };
-
-  // Dropdown 2: Download Animation (60 FPS MP4 / WebM / Smooth GIF via Native Canvas)
-  const handleExportAnimation = async (format: AnimationFormat) => {
-    if (isExporting || isRecording || messages.length === 0) {
-      return;
-    }
-    setExportError(null);
-
-    if (isPlaying) {
-      stopAnimation();
-      await waitNextFrames(2);
-    }
-
-    setIsRecording(true);
-    setExportProgress(0);
-
-    const controller = startNativeAnimationExport({
-      messages: messages.map((m) => ({ ...m })),
-      config: {
-        skin,
-        modelLabel,
-        theme,
-        device,
-        showIosStatusBar,
-        showBottomBar,
-        showFooterDisclaimer,
-        enableThoughtPill,
-      },
-      speed: playbackSpeed,
-      quality: videoQuality,
-      format,
-      onProgress: (pct) => setExportProgress(pct),
-    });
-
-    animationExportRef.current = controller;
-
-    try {
-      await controller.promise;
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Unable to export 60fps animation.';
-      setExportError(message);
-    } finally {
-      if (animationExportRef.current === controller) {
-        animationExportRef.current = null;
+  const handleExportImage = useCallback(
+    async (format: ImageFormat) => {
+      if (
+        !captureRef.current ||
+        isExportingRef.current ||
+        isRecordingRef.current
+      ) {
+        return;
       }
-      setIsRecording(false);
+      setExportError(null);
+
+      if (isPlayingRef.current) {
+        stopAnimation();
+        await waitNextFrames(3);
+      }
+
+      if (!captureRef.current) return;
+
+      setIsExporting(true);
+      try {
+        const exportDevice = previewMode === 'clean16x9' ? 'desktop' : device;
+        await exportCleanImage(
+          captureRef.current,
+          theme,
+          exportDevice,
+          format,
+          skin
+        );
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Unable to export image.';
+        setExportError(message);
+      } finally {
+        setIsExporting(false);
+      }
+    },
+    [device, previewMode, skin, stopAnimation, theme]
+  );
+
+  // Dropdown 2 & Direct 4K: Download Animation (60 FPS MP4 / WebM / Smooth GIF via Native Canvas)
+  const handleExportAnimation = useCallback(
+    async (format: AnimationFormat, overrideQuality?: VideoQuality) => {
+      if (
+        isExportingRef.current ||
+        isRecordingRef.current ||
+        messagesRef.current.length === 0
+      ) {
+        return;
+      }
+      setExportError(null);
+
+      if (isPlayingRef.current) {
+        stopAnimation();
+        await waitNextFrames(2);
+      }
+
+      const effectiveQuality = overrideQuality ?? videoQuality;
+      if (overrideQuality) {
+        setVideoQuality(overrideQuality);
+      }
+
+      setIsRecording(true);
       setExportProgress(0);
+      setExportFrame(0);
+      setExportTotalFrames(0);
+
+      const controller = startNativeAnimationExport({
+        messages: messagesRef.current.map((m) => ({ ...m })),
+        config: {
+          skin,
+          modelLabel,
+          theme,
+          device,
+          previewMode,
+          showHeader,
+          showSidebar,
+          showIosStatusBar,
+          showBottomBar,
+          showFooterDisclaimer,
+          enableThoughtPill,
+        },
+        speed: playbackSpeed,
+        quality: effectiveQuality,
+        format,
+        onProgress: ({ percent, currentFrame, totalFrames }) => {
+          setExportProgress(percent);
+          setExportFrame(currentFrame);
+          setExportTotalFrames(totalFrames);
+        },
+      });
+
+      animationExportRef.current = controller;
+
+      try {
+        await controller.promise;
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Unable to export 60fps animation.';
+        setExportError(message);
+      } finally {
+        if (animationExportRef.current === controller) {
+          animationExportRef.current = null;
+        }
+        setIsRecording(false);
+        setExportProgress(0);
+        setExportFrame(0);
+        setExportTotalFrames(0);
+      }
+    },
+    [
+      device,
+      enableThoughtPill,
+      modelLabel,
+      playbackSpeed,
+      previewMode,
+      showBottomBar,
+      showFooterDisclaimer,
+      showHeader,
+      showIosStatusBar,
+      showSidebar,
+      skin,
+      stopAnimation,
+      theme,
+      videoQuality,
+    ]
+  );
+
+  const handleExportAnimationClick = useCallback(
+    (format: AnimationFormat) => {
+      void handleExportAnimation(format);
+    },
+    [handleExportAnimation]
+  );
+
+  const handleExportVideoClick = useCallback(() => {
+    void handleExportAnimation('mp4');
+  }, [handleExportAnimation]);
+
+  const handleInstallOfflineApp = async () => {
+    if (offlineStudio.canPromptInstall) {
+      const accepted = await offlineStudio.promptInstall();
+      if (!accepted) {
+        setInstallGuideOpen(true);
+      }
+      return;
     }
+    setInstallGuideOpen(true);
   };
 
   if (activeView === 'home') {
@@ -459,7 +716,7 @@ export default function App() {
     >
       {/* Top Studio Header Bar (Hidden in Theater Mode) */}
       {!isTheaterMode && (
-        <header className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-slate-200 bg-white px-4 sm:px-5">
+        <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-1.5 sm:px-5">
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -474,16 +731,50 @@ export default function App() {
               <LayoutLabLogo size={22} />
               <span>LayoutLab</span>
             </div>
+
+            {isOfflineRoute && (
+              <span
+                className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-800 whitespace-nowrap"
+                title={
+                  offlineStudio.swReady
+                    ? 'Service worker cached for offline 4K exports'
+                    : 'Preparing offline studio cache'
+                }
+              >
+                {!offlineStudio.isOnline ? (
+                  <WifiOff className="h-3 w-3 text-emerald-700" aria-hidden="true" />
+                ) : (
+                  <ShieldCheck
+                    className="h-3.5 w-3.5 text-emerald-700"
+                    aria-hidden="true"
+                  />
+                )}
+                <span>Personal Offline Studio Unlocked</span>
+              </span>
+            )}
           </div>
 
-          <button
-            type="button"
-            onClick={() => setIsTheaterMode(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Theater Mode</span>
-          </button>
+          <div className="flex items-center gap-2">
+            {isOfflineRoute && !offlineStudio.isInstalled && (
+              <button
+                type="button"
+                onClick={() => void handleInstallOfflineApp()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Install Offline App to Phone</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setIsTheaterMode(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Theater Mode</span>
+            </button>
+          </div>
         </header>
       )}
 
@@ -527,14 +818,16 @@ export default function App() {
             skin={skin}
             onSkinChange={handleSkinChange}
             modelLabel={modelLabel}
-            onModelLabelChange={(value) => {
-              if (isPlaying || isRecording) stopAnimation();
-              setModelLabel(value);
-            }}
+            onModelLabelChange={handleModelLabelChange}
             theme={theme}
             onThemeChange={setTheme}
             device={device}
             onDeviceChange={setDevice}
+            previewMode={previewMode}
+            showHeader={showHeader}
+            onShowHeaderChange={setShowHeader}
+            showSidebar={showSidebar}
+            onShowSidebarChange={setShowSidebar}
             showIosStatusBar={showIosStatusBar}
             onShowIosStatusBarChange={setShowIosStatusBar}
             showBottomBar={showBottomBar}
@@ -548,19 +841,23 @@ export default function App() {
             onUpdateMessage={handleUpdateMessage}
             onUpdateMessageThought={handleUpdateMessageThought}
             onUpdateMessageAttachment={handleUpdateMessageAttachment}
+            onUpdateMessageSender={handleUpdateMessageSender}
             onToggleRole={handleToggleRole}
             onMoveMessage={handleMoveMessage}
             onDeleteMessage={handleDeleteMessage}
             onClearAll={handleClearAll}
             onLoadSample={handleLoadSample}
             onExportImage={handleExportImage}
-            onExportAnimation={handleExportAnimation}
+            onExportAnimation={handleExportAnimationClick}
+            onExportVideo={handleExportVideoClick}
             onCancelExport={cancelActiveExport}
             videoQuality={videoQuality}
             onVideoQualityChange={setVideoQuality}
             isExporting={isExporting}
             isRecording={isRecording}
             exportProgress={exportProgress}
+            exportFrame={exportFrame}
+            exportTotalFrames={exportTotalFrames}
             exportError={exportError}
             isPlaying={isPlaying}
             playbackSpeed={playbackSpeed}
@@ -575,6 +872,10 @@ export default function App() {
           modelLabel={modelLabel}
           theme={theme}
           device={device}
+          previewMode={previewMode}
+          onPreviewModeChange={handlePreviewModeChange}
+          showHeader={showHeader}
+          showSidebar={showSidebar}
           showIosStatusBar={showIosStatusBar}
           showBottomBar={showBottomBar}
           showFooterDisclaimer={showFooterDisclaimer}
@@ -589,6 +890,93 @@ export default function App() {
           isTheaterMode={isTheaterMode}
         />
       </div>
+
+      {/* Offline Install Guide Modal (iOS Safari / Manual Install Fallback) */}
+      {isOfflineRoute && installGuideOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="offline-install-title"
+          onClick={() => setInstallGuideOpen(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-xs"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl"
+          >
+            <div className="flex items-center justify-between gap-4 border-b border-slate-100 pb-4">
+              <div className="flex items-center gap-2">
+                <Smartphone className="h-4 w-4 text-slate-800" aria-hidden="true" />
+                <h2
+                  id="offline-install-title"
+                  className="text-base font-bold text-slate-900"
+                >
+                  Install Offline Studio
+                </h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close dialog"
+                onClick={() => setInstallGuideOpen(false)}
+                className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3 text-xs leading-relaxed text-slate-600">
+              {offlineStudio.isIOS ? (
+                <>
+                  <p>
+                    On iPhone or iPad Safari, tap the{' '}
+                    <strong className="font-semibold text-slate-900">
+                      Share
+                    </strong>{' '}
+                    button in the browser toolbar, then select{' '}
+                    <strong className="font-semibold text-slate-900">
+                      Add to Home Screen
+                    </strong>
+                    .
+                  </p>
+                  <p>
+                    Launch LayoutLab from your Home Screen icon to run all chat
+                    animations and 4K 60fps exports 100% offline.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p>
+                    Open your browser menu and choose{' '}
+                    <strong className="font-semibold text-slate-900">
+                      Install app
+                    </strong>{' '}
+                    or{' '}
+                    <strong className="font-semibold text-slate-900">
+                      Add to Home screen
+                    </strong>{' '}
+                    to save this personal studio directly on your device.
+                  </p>
+                  <p>
+                    {offlineStudio.swReady
+                      ? 'Offline cache is active — animations and 4K 60fps exports work without an internet connection.'
+                      : 'Service worker caching is initializing for offline 4K 60fps exports.'}
+                  </p>
+                </>
+              )}
+            </div>
+
+            <div className="mt-5 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setInstallGuideOpen(false)}
+                className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-slate-800 cursor-pointer"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

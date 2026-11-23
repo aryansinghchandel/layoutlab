@@ -1,4 +1,10 @@
-import type { AiSkin, ThemeMode } from '../types';
+import type {
+  AiSkin,
+  ChatMessage,
+  MessageSenderSkin,
+  StandardAiSkin,
+  ThemeMode,
+} from '../types';
 
 export interface SkinMeta {
   id: AiSkin;
@@ -47,6 +53,15 @@ export const AI_SKINS: Record<AiSkin, SkinMeta> = {
     disclaimer: 'Grok can make mistakes. Verify important information.',
     supportsReasoning: true,
   },
+  multi: {
+    id: 'multi',
+    name: 'Multi-AI',
+    defaultModel: 'Multi-AI Panel',
+    presets: ['Multi-AI Panel', 'AI Debate', 'Model Comparison', 'Team Chat'],
+    composerPlaceholder: 'Ask anything',
+    disclaimer: 'AI can make mistakes. Check important info.',
+    supportsReasoning: true,
+  },
 };
 
 export const SKIN_ORDER: readonly AiSkin[] = [
@@ -54,10 +69,87 @@ export const SKIN_ORDER: readonly AiSkin[] = [
   'claude',
   'gemini',
   'grok',
+  'multi',
 ] as const;
+
+export const STANDARD_SKIN_ORDER: readonly StandardAiSkin[] = [
+  'chatgpt',
+  'claude',
+  'gemini',
+  'grok',
+] as const;
+
+export interface SenderBadgeMeta {
+  senderSkin: MessageSenderSkin;
+  label: string;
+  badgeBg: string;
+  badgeText: string;
+  badgeBorder: string;
+}
+
+export function getSenderBadgeMeta(
+  msg: Pick<
+    ChatMessage,
+    'senderSkin' | 'customSenderName' | 'customSenderColor'
+  >,
+  activeSkin: AiSkin,
+  theme: ThemeMode
+): SenderBadgeMeta {
+  const isDark = theme === 'dark';
+  const resolved: MessageSenderSkin =
+    activeSkin === 'multi' ? (msg.senderSkin ?? 'chatgpt') : activeSkin;
+
+  switch (resolved) {
+    case 'claude':
+      return {
+        senderSkin: 'claude',
+        label: 'Claude',
+        badgeBg: isDark ? 'rgba(217, 119, 87, 0.16)' : '#fdf2ed',
+        badgeText: isDark ? '#f1a78e' : '#b85435',
+        badgeBorder: isDark ? 'rgba(217, 119, 87, 0.32)' : '#f2d3c5',
+      };
+    case 'gemini':
+      return {
+        senderSkin: 'gemini',
+        label: 'Gemini',
+        badgeBg: isDark ? 'rgba(66, 133, 244, 0.16)' : '#edf4ff',
+        badgeText: isDark ? '#93bbfd' : '#1a56c4',
+        badgeBorder: isDark ? 'rgba(66, 133, 244, 0.32)' : '#c7dcfb',
+      };
+    case 'grok':
+      return {
+        senderSkin: 'grok',
+        label: 'Grok',
+        badgeBg: isDark ? '#1e2024' : '#f1f5f9',
+        badgeText: isDark ? '#e4e4e7' : '#0f172a',
+        badgeBorder: isDark ? '#32353b' : '#cbd5e1',
+      };
+    case 'custom': {
+      const color = msg.customSenderColor || '#6366f1';
+      return {
+        senderSkin: 'custom',
+        label: msg.customSenderName?.trim() || 'Custom AI',
+        badgeBg: isDark ? '#1f2128' : '#f1f5f9',
+        badgeText: isDark ? '#e2e8f0' : '#0f172a',
+        badgeBorder: color,
+      };
+    }
+    case 'chatgpt':
+    default:
+      return {
+        senderSkin: 'chatgpt',
+        label: 'ChatGPT',
+        badgeBg: isDark ? 'rgba(16, 163, 127, 0.16)' : '#ecfdf5',
+        badgeText: isDark ? '#6ee7b7' : '#047857',
+        badgeBorder: isDark ? 'rgba(16, 163, 127, 0.32)' : '#a7f3d0',
+      };
+  }
+}
 
 export interface SkinPalette {
   canvasBg: string;
+  sidebarBg: string;
+  sidebarBorder: string;
   textPrimary: string;
   textSecondary: string;
   textMuted: string;
@@ -93,6 +185,8 @@ export function getSkinPalette(skin: AiSkin, theme: ThemeMode): SkinPalette {
     case 'claude':
       return {
         canvasBg: isDark ? '#2b2a27' : '#f5f4ef',
+        sidebarBg: isDark ? '#23221f' : '#edece6',
+        sidebarBorder: isDark ? '#3a3833' : '#dfddd4',
         textPrimary: isDark ? '#eceae4' : '#1f1e1b',
         textSecondary: isDark ? '#b5b1a8' : '#5f5d55',
         textMuted: isDark ? '#97938a' : '#7c7a72',
@@ -126,6 +220,8 @@ export function getSkinPalette(skin: AiSkin, theme: ThemeMode): SkinPalette {
     case 'gemini':
       return {
         canvasBg: isDark ? '#131314' : '#ffffff',
+        sidebarBg: isDark ? '#1b1c1d' : '#f0f4f9',
+        sidebarBorder: isDark ? '#2c2e30' : '#dde3ea',
         textPrimary: isDark ? '#e3e3e3' : '#1f1f1f',
         textSecondary: isDark ? '#c4c7c5' : '#444746',
         textMuted: isDark ? '#8e918f' : '#747775',
@@ -157,6 +253,8 @@ export function getSkinPalette(skin: AiSkin, theme: ThemeMode): SkinPalette {
     case 'grok':
       return {
         canvasBg: isDark ? '#000000' : '#ffffff',
+        sidebarBg: isDark ? '#0a0a0c' : '#f8fafc',
+        sidebarBorder: isDark ? '#222226' : '#e5e7eb',
         textPrimary: isDark ? '#f5f5f5' : '#0f1419',
         textSecondary: isDark ? '#a1a1aa' : '#536471',
         textMuted: isDark ? '#71717a' : '#6b7280',
@@ -187,10 +285,47 @@ export function getSkinPalette(skin: AiSkin, theme: ThemeMode): SkinPalette {
         attachmentCardBorder: isDark ? '#27272a' : '#e5e7eb',
       };
 
+    case 'multi':
+      return {
+        canvasBg: isDark ? '#18181b' : '#ffffff',
+        sidebarBg: isDark ? '#111114' : '#f8fafc',
+        sidebarBorder: isDark ? '#27272a' : '#e2e8f0',
+        textPrimary: isDark ? '#f4f4f5' : '#0f172a',
+        textSecondary: isDark ? '#a1a1aa' : '#475569',
+        textMuted: isDark ? '#71717a' : '#64748b',
+        userBubbleBg: isDark ? '#27272a' : '#f1f5f9',
+        userBubbleBorder: isDark ? '#3f3f46' : '#e2e8f0',
+        avatarBg: isDark ? '#18181b' : '#ffffff',
+        avatarBorder: isDark ? 'rgba(255, 255, 255, 0.14)' : '#e2e8f0',
+        composerBg: isDark ? '#222226' : '#ffffff',
+        composerBorder: isDark ? '#38383f' : '#dbe1ea',
+        composerShadow: isDark
+          ? '0 2px 10px rgba(0, 0, 0, 0.28)'
+          : '0 2px 10px rgba(15, 23, 42, 0.05)',
+        sendBtnBg: isDark ? '#ffffff' : '#0f172a',
+        sendBtnFg: isDark ? '#18181b' : '#ffffff',
+        inlineCodeBg: isDark ? '#27272a' : '#f1f5f9',
+        inlineCodeFg: isDark ? '#f4f4f5' : '#0f172a',
+        blockquoteBorder: isDark ? '#3f3f46' : '#cbd5e1',
+        blockquoteFg: isDark ? '#d4d4d8' : '#334155',
+        hrBg: isDark ? '#27272a' : '#e2e8f0',
+        codeBlockBorder: isDark ? '#27272a' : '#1e293b',
+        pillBg: isDark ? '#27272a' : '#f1f5f9',
+        pillBorder: isDark ? '#3f3f46' : '#e2e8f0',
+        pillText: isDark ? '#d4d4d8' : '#334155',
+        thoughtBg: isDark ? '#222226' : '#f4f6fa',
+        thoughtBorder: isDark ? '#34343a' : '#e2e8f0',
+        thoughtText: isDark ? '#a1a1aa' : '#64748b',
+        attachmentCardBg: isDark ? '#27272a' : '#f1f5f9',
+        attachmentCardBorder: isDark ? '#3f3f46' : '#e2e8f0',
+      };
+
     case 'chatgpt':
     default:
       return {
         canvasBg: isDark ? '#212121' : '#ffffff',
+        sidebarBg: isDark ? '#171717' : '#f9f9f9',
+        sidebarBorder: isDark ? '#2d2d2d' : '#ebebeb',
         textPrimary: isDark ? '#ececec' : '#0d0d0d',
         textSecondary: isDark ? '#b4b4b4' : '#5d5d5d',
         textMuted: isDark ? '#9b9b9b' : '#8e8e8e',

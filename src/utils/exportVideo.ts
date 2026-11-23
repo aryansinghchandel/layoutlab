@@ -1,3 +1,11 @@
+import {
+  ArrayBufferTarget as Mp4ArrayBufferTarget,
+  Muxer as Mp4Muxer,
+} from 'mp4-muxer';
+import {
+  ArrayBufferTarget as WebmArrayBufferTarget,
+  Muxer as WebmMuxer,
+} from 'webm-muxer';
 import type {
   AnimationFormat,
   ChatMessage,
@@ -33,9 +41,23 @@ declare global {
   }
 }
 
+export interface ExportProgressInfo {
+  percent: number;
+  currentFrame: number;
+  totalFrames: number;
+}
+
 export interface AnimationExportController {
   promise: Promise<void>;
   cancel: () => void;
+}
+
+const EXPORT_FPS = 60;
+const FRAME_STEP_MS = 1000 / EXPORT_FPS;
+const FRAME_DURATION_US = Math.round(1_000_000 / EXPORT_FPS);
+
+function yieldToMainThread(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
 function pickVideoMimeType(
@@ -70,6 +92,135 @@ function pickVideoMimeType(
   }
 
   return { mimeType: '', extension: 'webm' };
+}
+
+interface SupportedWebCodecsSetup {
+  container: 'mp4' | 'webm';
+  mp4Codec?: 'avc' | 'vp9';
+  webmCodec?: 'V_VP9' | 'V_VP8';
+  encoderConfig: VideoEncoderConfig;
+}
+
+async function probeWebCodecsSetup(
+  requestedFormat: 'mp4' | 'webm',
+  width: number,
+  height: number,
+  bitrate: number
+): Promise<SupportedWebCodecsSetup | null> {
+  if (
+    typeof VideoEncoder === 'undefined' ||
+    typeof VideoFrame === 'undefined'
+  ) {
+    return null;
+  }
+
+  const isUltraHd = width > 1920 || height > 1080;
+
+  if (requestedFormat === 'mp4') {
+    const avcCodecs = isUltraHd
+      ? [
+          'avc1.640034',
+          'avc1.4d0034',
+          'avc1.420034',
+          'avc1.640033',
+          'avc1.4d0033',
+        ]
+      : [
+          'avc1.64002a',
+          'avc1.4d002a',
+          'avc1.42002a',
+          'avc1.640028',
+          'avc1.4d0028',
+          'avc1.42E01F',
+        ];
+
+    for (const codec of avcCodecs) {
+      const cfg: VideoEncoderConfig = {
+        codec,
+        width,
+        height,
+        bitrate,
+        framerate: EXPORT_FPS,
+        avc: { format: 'avc' },
+      };
+      try {
+        const support = await VideoEncoder.isConfigSupported(cfg);
+        if (support.supported) {
+          return {
+            container: 'mp4',
+            mp4Codec: 'avc',
+            encoderConfig: cfg,
+          };
+        }
+      } catch {
+        // Try next codec candidate
+      }
+    }
+
+    const vp9Codecs = isUltraHd
+      ? ['vp09.00.50.08', 'vp09.00.41.08', 'vp09.00.10.08']
+      : ['vp09.00.41.08', 'vp09.00.10.08'];
+
+    for (const codec of vp9Codecs) {
+      const cfg: VideoEncoderConfig = {
+        codec,
+        width,
+        height,
+        bitrate,
+        framerate: EXPORT_FPS,
+      };
+      try {
+        const support = await VideoEncoder.isConfigSupported(cfg);
+        if (support.supported) {
+          return {
+            container: 'mp4',
+            mp4Codec: 'vp9',
+            encoderConfig: cfg,
+          };
+        }
+      } catch {
+        // Try next codec candidate
+      }
+    }
+  }
+
+  const webmCandidates: Array<{ codec: string; muxCodec: 'V_VP9' | 'V_VP8' }> =
+    isUltraHd
+      ? [
+          { codec: 'vp09.00.50.08', muxCodec: 'V_VP9' },
+          { codec: 'vp09.00.41.08', muxCodec: 'V_VP9' },
+          { codec: 'vp09.00.10.08', muxCodec: 'V_VP9' },
+          { codec: 'vp8', muxCodec: 'V_VP8' },
+        ]
+      : [
+          { codec: 'vp09.00.41.08', muxCodec: 'V_VP9' },
+          { codec: 'vp09.00.10.08', muxCodec: 'V_VP9' },
+          { codec: 'vp8', muxCodec: 'V_VP8' },
+        ];
+
+  for (const item of webmCandidates) {
+    const cfg: VideoEncoderConfig = {
+      codec: item.codec,
+      width,
+      height,
+      bitrate,
+      framerate: EXPORT_FPS,
+    };
+    try {
+      const support = await VideoEncoder.isConfigSupported(cfg);
+      if (support.supported) {
+        return {
+          container: 'webm',
+          webmCodec: item.muxCodec,
+          encoderConfig: cfg,
+        };
+      }
+    } catch {
+      // Try next codec candidate
+    }
+  }
+
+  return null;
 }
 
 async function ensureGifJsLoaded(): Promise<NonNullable<Window['GIF']>> {
@@ -132,20 +283,26 @@ export function startNativeAnimationExport(params: {
   speed: PlaybackSpeed;
   quality: VideoQuality;
   format: AnimationFormat;
-  onProgress: (percent: number) => void;
+  onProgress: (info: ExportProgressInfo) => void;
 }): AnimationExportController {
   const { messages, config, speed, quality, format, onProgress } = params;
   let cancelled = false;
-  let activeRafId = 0;
   let activeRecorder: MediaRecorder | null = null;
   let activeStream: MediaStream | null = null;
+  let activeEncoder: VideoEncoder | null = null;
   let activeGif: GifJsInstance | null = null;
   let activeWorkerUrl: string | null = null;
 
   const cleanup = () => {
-    if (activeRafId) {
-      window.cancelAnimationFrame(activeRafId);
-      activeRafId = 0;
+    if (activeEncoder) {
+      try {
+        if (activeEncoder.state !== 'closed') {
+          activeEncoder.close();
+        }
+      } catch {
+        // Ignore close errors during cleanup
+      }
+      activeEncoder = null;
     }
     if (activeStream) {
       activeStream.getTracks().forEach((t) => t.stop());
@@ -203,10 +360,18 @@ export function startNativeAnimationExport(params: {
         return;
       }
 
-      const timeline = buildAnimationTimeline(messages, speed, config.showBottomBar);
+      const timeline = buildAnimationTimeline(
+        messages,
+        speed,
+        config.showBottomBar
+      );
       const scrollState: ScrollState = { y: 0 };
-      const frameDelayMs = 40; // Smooth 25 FPS GIF
-      const totalSteps = Math.max(1, Math.ceil(timeline.totalDurationMs / frameDelayMs));
+      const frameDelayMs = 40; // Smooth deterministic 25 FPS GIF
+      const totalSteps = Math.max(
+        1,
+        Math.ceil(timeline.totalDurationMs / frameDelayMs)
+      );
+      const totalFrames = totalSteps + 1;
 
       const gif = new GIFConstructor({
         workers: 2,
@@ -217,12 +382,13 @@ export function startNativeAnimationExport(params: {
       });
       activeGif = gif;
 
+      let currentTimeMs = 0;
       for (let step = 0; step <= totalSteps; step++) {
         if (cancelled) {
           cleanup();
           return;
         }
-        const elapsed = Math.min(step * frameDelayMs, timeline.totalDurationMs);
+        const elapsed = Math.min(currentTimeMs, timeline.totalDurationMs);
         const frame = timeline.evaluateAt(elapsed);
         renderChatFrameToCanvas(
           ctx,
@@ -235,18 +401,27 @@ export function startNativeAnimationExport(params: {
           imageCache
         );
         gif.addFrame(canvas, { copy: true, delay: frameDelayMs });
-        onProgress(Math.min(40, Math.round((step / totalSteps) * 40)));
+        currentTimeMs += frameDelayMs;
 
-        if (step % 4 === 0) {
-          await new Promise((r) => window.setTimeout(r, 0));
-        }
+        const currentFrame = step + 1;
+        onProgress({
+          percent: Math.min(40, Math.round((currentFrame / totalFrames) * 40)),
+          currentFrame,
+          totalFrames,
+        });
+
+        await yieldToMainThread();
       }
 
       await new Promise<void>((resolve, reject) => {
         gif.on('progress', (p) => {
           if (cancelled) return;
           const pct = typeof p === 'number' ? p : 0;
-          onProgress(Math.min(99, 40 + Math.round(pct * 60)));
+          onProgress({
+            percent: Math.min(99, 40 + Math.round(pct * 60)),
+            currentFrame: totalFrames,
+            totalFrames,
+          });
         });
         gif.on('finished', (blob) => {
           if (cancelled) {
@@ -254,7 +429,11 @@ export function startNativeAnimationExport(params: {
             resolve();
             return;
           }
-          onProgress(100);
+          onProgress({
+            percent: 100,
+            currentFrame: totalFrames,
+            totalFrames,
+          });
           triggerBlobDownload(blob as Blob, 'layoutlab-animation.gif');
           cleanup();
           resolve();
@@ -273,17 +452,284 @@ export function startNativeAnimationExport(params: {
       return;
     }
 
-    // 60 FPS Native Canvas Video Export (MP4 or WebM)
-    canvas.width = Math.round(logicalWidth * scale);
-    canvas.height = Math.round(logicalHeight * scale);
+    // Ensure even pixel dimensions required by H.264 / VP9 video encoders
+    const pixelWidth = Math.max(2, Math.round((logicalWidth * scale) / 2) * 2);
+    const pixelHeight = Math.max(2, Math.round((logicalHeight * scale) / 2) * 2);
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
 
+    const timeline = buildAnimationTimeline(
+      messages,
+      speed,
+      config.showBottomBar
+    );
+    const scrollState: ScrollState = { y: 0 };
+    const totalFrames = Math.max(
+      1,
+      Math.ceil(timeline.totalDurationMs / FRAME_STEP_MS) + 1
+    );
+
+    // Primary Path: Frame-Locked Deterministic WebCodecs (VideoEncoder + MP4/WebM Muxer)
+    const webCodecsSetup = await probeWebCodecsSetup(
+      format,
+      pixelWidth,
+      pixelHeight,
+      videoBitsPerSecond
+    );
+    if (cancelled) {
+      cleanup();
+      return;
+    }
+
+    if (webCodecsSetup) {
+      let encoderFailure: Error | null = null;
+
+      if (webCodecsSetup.container === 'mp4') {
+        const target = new Mp4ArrayBufferTarget();
+        const muxer = new Mp4Muxer({
+          target,
+          video: {
+            codec: webCodecsSetup.mp4Codec ?? 'avc',
+            width: pixelWidth,
+            height: pixelHeight,
+            frameRate: EXPORT_FPS,
+          },
+          fastStart: 'in-memory',
+          firstTimestampBehavior: 'strict',
+        });
+
+        const encoder = new VideoEncoder({
+          output: (chunk, meta) => {
+            muxer.addVideoChunk(chunk, meta);
+          },
+          error: (err) => {
+            encoderFailure =
+              err instanceof Error ? err : new Error(String(err));
+          },
+        });
+        activeEncoder = encoder;
+        encoder.configure(webCodecsSetup.encoderConfig);
+
+        onProgress({ percent: 0, currentFrame: 0, totalFrames });
+
+        let currentTimeMs = 0;
+        for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+          if (cancelled) {
+            cleanup();
+            return;
+          }
+          if (encoderFailure) {
+            throw encoderFailure;
+          }
+
+          const clampedElapsed = Math.min(
+            currentTimeMs,
+            timeline.totalDurationMs
+          );
+          const frameState = timeline.evaluateAt(clampedElapsed);
+
+          renderChatFrameToCanvas(
+            ctx,
+            logicalWidth,
+            logicalHeight,
+            scale,
+            config,
+            frameState,
+            scrollState,
+            imageCache
+          );
+
+          while (!cancelled && !encoderFailure && encoder.encodeQueueSize > 8) {
+            await yieldToMainThread();
+          }
+          if (cancelled) {
+            cleanup();
+            return;
+          }
+          if (encoderFailure) {
+            throw encoderFailure;
+          }
+
+          const timestampUs = Math.round(
+            frameIndex * (1_000_000 / EXPORT_FPS)
+          );
+          const videoFrame = new VideoFrame(canvas, {
+            timestamp: timestampUs,
+            duration: FRAME_DURATION_US,
+          });
+          try {
+            encoder.encode(videoFrame, {
+              keyFrame: frameIndex % (EXPORT_FPS * 2) === 0,
+            });
+          } finally {
+            videoFrame.close();
+          }
+
+          // Advance deterministic animation clock strictly AFTER frame is captured & encoded
+          currentTimeMs += FRAME_STEP_MS;
+
+          const currentFrame = frameIndex + 1;
+          onProgress({
+            percent: Math.min(
+              99,
+              Math.round((currentFrame / totalFrames) * 100)
+            ),
+            currentFrame,
+            totalFrames,
+          });
+
+          // Yield briefly to keep scrolling, Cancel, and progress bar smooth
+          await yieldToMainThread();
+        }
+
+        if (cancelled) {
+          cleanup();
+          return;
+        }
+        if (encoderFailure) {
+          throw encoderFailure;
+        }
+
+        await encoder.flush();
+        if (cancelled) {
+          cleanup();
+          return;
+        }
+        muxer.finalize();
+        const blob = new Blob([target.buffer], { type: 'video/mp4' });
+        onProgress({ percent: 100, currentFrame: totalFrames, totalFrames });
+        triggerBlobDownload(blob, 'layoutlab-animation.mp4');
+        cleanup();
+        return;
+      }
+
+      // WebM via WebCodecs + webm-muxer
+      const target = new WebmArrayBufferTarget();
+      const muxer = new WebmMuxer({
+        target,
+        video: {
+          codec: webCodecsSetup.webmCodec ?? 'V_VP9',
+          width: pixelWidth,
+          height: pixelHeight,
+          frameRate: EXPORT_FPS,
+        },
+        firstTimestampBehavior: 'strict',
+      });
+
+      const encoder = new VideoEncoder({
+        output: (chunk, meta) => {
+          muxer.addVideoChunk(chunk, meta);
+        },
+        error: (err) => {
+          encoderFailure = err instanceof Error ? err : new Error(String(err));
+        },
+      });
+      activeEncoder = encoder;
+      encoder.configure(webCodecsSetup.encoderConfig);
+
+      onProgress({ percent: 0, currentFrame: 0, totalFrames });
+
+      let currentTimeMs = 0;
+      for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+        if (cancelled) {
+          cleanup();
+          return;
+        }
+        if (encoderFailure) {
+          throw encoderFailure;
+        }
+
+        const clampedElapsed = Math.min(
+          currentTimeMs,
+          timeline.totalDurationMs
+        );
+        const frameState = timeline.evaluateAt(clampedElapsed);
+
+        renderChatFrameToCanvas(
+          ctx,
+          logicalWidth,
+          logicalHeight,
+          scale,
+          config,
+          frameState,
+          scrollState,
+          imageCache
+        );
+
+        while (!cancelled && !encoderFailure && encoder.encodeQueueSize > 8) {
+          await yieldToMainThread();
+        }
+        if (cancelled) {
+          cleanup();
+          return;
+        }
+        if (encoderFailure) {
+          throw encoderFailure;
+        }
+
+        const timestampUs = Math.round(frameIndex * (1_000_000 / EXPORT_FPS));
+        const videoFrame = new VideoFrame(canvas, {
+          timestamp: timestampUs,
+          duration: FRAME_DURATION_US,
+        });
+        try {
+          encoder.encode(videoFrame, {
+            keyFrame: frameIndex % (EXPORT_FPS * 2) === 0,
+          });
+        } finally {
+          videoFrame.close();
+        }
+
+        currentTimeMs += FRAME_STEP_MS;
+
+        const currentFrame = frameIndex + 1;
+        onProgress({
+          percent: Math.min(
+            99,
+            Math.round((currentFrame / totalFrames) * 100)
+          ),
+          currentFrame,
+          totalFrames,
+        });
+
+        await yieldToMainThread();
+      }
+
+      if (cancelled) {
+        cleanup();
+        return;
+      }
+      if (encoderFailure) {
+        throw encoderFailure;
+      }
+
+      await encoder.flush();
+      if (cancelled) {
+        cleanup();
+        return;
+      }
+      muxer.finalize();
+      const blob = new Blob([target.buffer], { type: 'video/webm' });
+      onProgress({ percent: 100, currentFrame: totalFrames, totalFrames });
+      triggerBlobDownload(blob, 'layoutlab-animation.webm');
+      cleanup();
+      return;
+    }
+
+    // Fallback Path (Legacy browsers without WebCodecs):
+    // Still strictly deterministic frame-by-frame (never uses Date.now() / performance.now())
     if (typeof canvas.captureStream !== 'function') {
-      throw new Error('Canvas 60 FPS stream capture is not supported in this browser.');
+      throw new Error(
+        'Canvas 60 FPS video export is not supported in this browser.'
+      );
     }
 
     const { mimeType, extension } = pickVideoMimeType(format);
-    const stream = canvas.captureStream(60);
+    const stream = canvas.captureStream(0);
     activeStream = stream;
+    const videoTrack = stream.getVideoTracks()[0] as
+      | (MediaStreamTrack & { requestFrame?: () => void })
+      | undefined;
 
     const recorder = new MediaRecorder(stream, {
       videoBitsPerSecond,
@@ -298,10 +744,6 @@ export function startNativeAnimationExport(params: {
       }
     };
 
-    const timeline = buildAnimationTimeline(messages, speed, config.showBottomBar);
-    const scrollState: ScrollState = { y: 0 };
-
-    // Paint initial frame cleanly before starting recorder
     renderChatFrameToCanvas(
       ctx,
       logicalWidth,
@@ -324,7 +766,11 @@ export function startNativeAnimationExport(params: {
           const blob = new Blob(chunks, {
             type: mimeType || `video/${extension}`,
           });
-          onProgress(100);
+          onProgress({
+            percent: 100,
+            currentFrame: totalFrames,
+            totalFrames,
+          });
           triggerBlobDownload(blob, `layoutlab-animation.${extension}`);
           cleanup();
           resolve();
@@ -340,47 +786,46 @@ export function startNativeAnimationExport(params: {
     });
 
     recorder.start(200);
-    const startTime = performance.now();
-    onProgress(0);
+    onProgress({ percent: 0, currentFrame: 0, totalFrames });
 
-    await new Promise<void>((resolve) => {
-      const tick = (now: number) => {
-        if (cancelled) {
-          resolve();
-          return;
-        }
+    let currentTimeMs = 0;
+    for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+      if (cancelled) {
+        cleanup();
+        return;
+      }
 
-        const elapsedMs = now - startTime;
-        const clampedElapsed = Math.min(elapsedMs, timeline.totalDurationMs);
-        const frame = timeline.evaluateAt(clampedElapsed);
+      const clampedElapsed = Math.min(currentTimeMs, timeline.totalDurationMs);
+      const frame = timeline.evaluateAt(clampedElapsed);
 
-        renderChatFrameToCanvas(
-          ctx,
-          logicalWidth,
-          logicalHeight,
-          scale,
-          config,
-          frame,
-          scrollState,
-          imageCache
-        );
+      renderChatFrameToCanvas(
+        ctx,
+        logicalWidth,
+        logicalHeight,
+        scale,
+        config,
+        frame,
+        scrollState,
+        imageCache
+      );
 
-        const pct = Math.min(
-          99,
-          Math.round((clampedElapsed / Math.max(1, timeline.totalDurationMs)) * 100)
-        );
-        onProgress(pct);
+      if (videoTrack && typeof videoTrack.requestFrame === 'function') {
+        videoTrack.requestFrame();
+      }
 
-        if (elapsedMs >= timeline.totalDurationMs) {
-          resolve();
-          return;
-        }
+      currentTimeMs += FRAME_STEP_MS;
 
-        activeRafId = window.requestAnimationFrame(tick);
-      };
+      const currentFrame = frameIndex + 1;
+      onProgress({
+        percent: Math.min(99, Math.round((currentFrame / totalFrames) * 100)),
+        currentFrame,
+        totalFrames,
+      });
 
-      activeRafId = window.requestAnimationFrame(tick);
-    });
+      await new Promise<void>((resolve) =>
+        window.setTimeout(resolve, Math.round(FRAME_STEP_MS))
+      );
+    }
 
     if (cancelled) {
       cleanup();
