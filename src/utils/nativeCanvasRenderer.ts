@@ -25,6 +25,7 @@ export interface RenderConfig {
   theme: ThemeMode;
   device: DeviceMode;
   previewMode: PreviewMode;
+  cleanFontSize?: 26 | 28 | 34;
   showHeader: boolean;
   showSidebar: boolean;
   showIosStatusBar: boolean;
@@ -83,7 +84,7 @@ function getBodyFontFamily(skin: MessageSenderSkin | AiSkin): string {
 
 export async function preloadAttachmentImages(
   messages: ChatMessage[]
-): Promise<Map<string, HTMLImageElement>> {
+): Promise> {
   const cache = new Map<string, HTMLImageElement>();
   const tasks: Promise<void>[] = [];
 
@@ -211,7 +212,6 @@ export function buildAnimationTimeline(
   });
 
   if (includeFinalHold) {
-    // 1.5-second pause on the completed final frame
     pushSegment(1500, {
       kind: 'final_hold',
       msgIndex: messages.length - 1,
@@ -1071,7 +1071,7 @@ function getFontSpec(
   fontFamily: string
 ): string {
   if (code) {
-    return `500 ${Math.round(fontSize * 0.86)}px ${MONO_FONT}`;
+    return `500 ${Math.round(fontSize * 0.84)}px ${MONO_FONT}`;
   }
   const style = italic ? 'italic ' : '';
   const weight = bold ? '600' : '400';
@@ -1374,10 +1374,14 @@ function processMarkdownBlock(
   palette: SkinPalette,
   fontFamily: string,
   draw: boolean,
-  textScale = 1
+  cleanFontPx = 0
 ): MarkdownDrawResult {
-  const bodySize = Math.round(15 * textScale);
-  const bodyLineH = Math.round(24.5 * textScale * 10) / 10;
+  const isViral16x9 = cleanFontPx > 0;
+  const bodySize = isViral16x9 ? cleanFontPx : 15;
+  const lineRatio = cleanFontPx >= 32 ? 1.3 : 1.38;
+  const bodyLineH = isViral16x9
+    ? Math.round(cleanFontPx * lineRatio * 10) / 10
+    : 24.5;
   let y = startY;
   let lastCursorX = startX;
   let lastCursorY = startY + bodyLineH / 2;
@@ -1444,15 +1448,25 @@ function processMarkdownBlock(
         fontFamily
       );
       drawLines(lines, startX, palette.textPrimary, bodySize);
-      if (!isLast) y += Math.round(10 * textScale);
+      if (!isLast) y += isViral16x9 ? 14 : 10;
       continue;
     }
 
     if (tok.type === 'heading') {
       const h = tok as Tokens.Heading;
-      if (idx > 0) y += Math.round(6 * textScale);
-      const size = Math.round((h.depth === 1 ? 22 : h.depth === 2 ? 18 : 16) * textScale);
-      const lh = Math.round(size * 1.38);
+      if (idx > 0) y += isViral16x9 ? 8 : 6;
+      const size = isViral16x9
+        ? h.depth === 1
+          ? cleanFontPx + 6
+          : h.depth === 2
+            ? cleanFontPx + 3
+            : cleanFontPx + 1
+        : h.depth === 1
+          ? 22
+          : h.depth === 2
+            ? 18
+            : 16;
+      const lh = Math.round(size * 1.32);
       const runs = flattenInlineTokens(h.tokens, {
         bold: true,
         italic: false,
@@ -1460,14 +1474,14 @@ function processMarkdownBlock(
       });
       const lines = layoutInlineRuns(ctx, runs, maxWidth, size, lh, fontFamily);
       drawLines(lines, startX, palette.textPrimary, size);
-      if (!isLast) y += Math.round(8 * textScale);
+      if (!isLast) y += isViral16x9 ? 10 : 8;
       continue;
     }
 
     if (tok.type === 'list') {
       const list = tok as Tokens.List;
       if (idx > 0) y += 2;
-      const indent = Math.round(22 * textScale);
+      const indent = isViral16x9 ? Math.round(cleanFontPx * 1.05) : 22;
       const startNum = typeof list.start === 'number' ? list.start : 1;
 
       list.items.forEach((item, itemIdx) => {
@@ -1488,7 +1502,7 @@ function processMarkdownBlock(
           runs,
           Math.max(60, maxWidth - indent),
           bodySize,
-          Math.round(24 * textScale),
+          bodyLineH,
           fontFamily
         );
 
@@ -1496,12 +1510,12 @@ function processMarkdownBlock(
           ctx.fillStyle = palette.textSecondary;
           ctx.font = `500 ${bodySize}px ${fontFamily}`;
           ctx.textBaseline = 'middle';
-          ctx.fillText(marker, startX + 4, y + Math.round(12 * textScale));
+          ctx.fillText(marker, startX + 4, y + bodyLineH / 2);
         }
         drawLines(lines, startX + indent, palette.textPrimary, bodySize);
-        y += Math.round(5 * textScale);
+        y += isViral16x9 ? 7 : 5;
       });
-      if (!isLast) y += Math.round(6 * textScale);
+      if (!isLast) y += isViral16x9 ? 8 : 6;
       continue;
     }
 
@@ -1512,8 +1526,8 @@ function processMarkdownBlock(
         c.lang && c.lang.trim()
           ? c.lang.trim().split(/\s+/)[0].toLowerCase()
           : 'code';
-      const headerH = Math.round(30 * (textScale > 1 ? 1.2 : 1));
-      const codeSize = Math.round(13 * (textScale > 1 ? 1.27 : 1));
+      const headerH = isViral16x9 ? 38 : 30;
+      const codeSize = isViral16x9 ? Math.max(20, cleanFontPx - 7) : 13;
       const codeFont = `400 ${codeSize}px ${MONO_FONT}`;
       const codeLines = wrapPlainText(
         ctx,
@@ -1521,8 +1535,8 @@ function processMarkdownBlock(
         Math.max(80, maxWidth - 36),
         codeFont
       );
-      const codeLineH = Math.round(codeSize * 1.54);
-      const bodyPadY = textScale > 1 ? 16 : 14;
+      const codeLineH = Math.round(codeSize * 1.36);
+      const bodyPadY = isViral16x9 ? 16 : 14;
       const bodyH = codeLines.length * codeLineH + bodyPadY * 2;
       const totalBoxH = headerH + bodyH;
 
@@ -1538,7 +1552,7 @@ function processMarkdownBlock(
         roundedTopRectPath(ctx, startX, y, maxWidth, headerH, 10);
         ctx.fill();
 
-        const headerFontSize = textScale > 1 ? 14 : 12;
+        const headerFontSize = isViral16x9 ? 14 : 12;
         ctx.fillStyle = '#b4b4b4';
         ctx.font = `400 ${headerFontSize}px ${INTER_FONT}`;
         ctx.textBaseline = 'middle';
@@ -1599,13 +1613,13 @@ function processMarkdownBlock(
       const innerRes = processMarkdownBlock(
         ctx,
         bq.tokens,
-        startX + Math.round(14 * textScale),
+        startX + (isViral16x9 ? 18 : 14),
         y,
-        Math.max(60, maxWidth - Math.round(14 * textScale)),
+        Math.max(60, maxWidth - (isViral16x9 ? 18 : 14)),
         { ...palette, textPrimary: palette.blockquoteFg },
         fontFamily,
         draw,
-        textScale
+        cleanFontPx
       );
       if (draw) {
         ctx.fillStyle = palette.blockquoteBorder;
@@ -1615,7 +1629,7 @@ function processMarkdownBlock(
       lastCursorX = innerRes.cursorX;
       lastCursorY = innerRes.cursorY;
       lastCursorColor = innerRes.cursorColor;
-      if (!isLast) y += Math.round(10 * textScale);
+      if (!isLast) y += isViral16x9 ? 12 : 10;
       continue;
     }
 
@@ -1644,11 +1658,11 @@ function processMarkdownBlock(
         runs,
         maxWidth,
         bodySize,
-        Math.round(24 * textScale),
+        bodyLineH,
         fontFamily
       );
       drawLines(lines, startX, palette.textPrimary, bodySize);
-      if (!isLast) y += Math.round(8 * textScale);
+      if (!isLast) y += isViral16x9 ? 10 : 8;
     }
   }
 
@@ -1710,7 +1724,6 @@ function drawAttachmentBlock(
     return;
   }
 
-  // Compact file badge
   ctx.save();
   ctx.fillStyle = palette.attachmentCardBg;
   roundedRectPath(ctx, x, y, size.width, size.height, 10);
@@ -1719,7 +1732,6 @@ function drawAttachmentBlock(
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // File icon
   ctx.strokeStyle = palette.textSecondary;
   ctx.lineWidth = 1.6;
   ctx.lineCap = 'round';
@@ -1825,7 +1837,8 @@ export function computeLogicalDimensions(
         bodyMaxW,
         palette,
         getBodyFontFamily(effectiveSender),
-        false
+        false,
+        0
       );
       messagesH += Math.max(28, senderBadgeH + thoughtH + mdRes.height + 25);
     }
@@ -1862,7 +1875,6 @@ function drawInFrameSidebar(
   ctx.fillStyle = palette.sidebarBorder;
   ctx.fillRect(sidebarW - 1, 0, 1, logicalHeight);
 
-  // Top New Chat row
   drawSidebarToggleIcon(ctx, 16, 18, palette.textSecondary);
   drawNewChatIcon(ctx, sidebarW - 34, 18, 18, palette.textSecondary);
 
@@ -1902,12 +1914,31 @@ export function renderChatFrameToCanvas(
 ): void {
   const isClean16x9 = config.previewMode === 'clean16x9';
   const isMobile = !isClean16x9 && config.device === 'mobile';
-  const textScale = isClean16x9 ? 1.333 : 1;
-  const msgFontSize = isClean16x9 ? 20 : 15;
-  const userLineH = isClean16x9 ? 30 : 23;
-  const avatarSize = isClean16x9 ? 36 : 28;
-  const avatarGap = isClean16x9 ? 20 : isMobile ? 12 : 16;
-  const palette = getSkinPalette(config.skin, config.theme);
+  const activeCleanFont = isClean16x9 ? (config.cleanFontSize ?? 28) : 0;
+  const isXL = activeCleanFont >= 32;
+  const msgFontSize = isClean16x9 ? activeCleanFont - 2 : 15;
+  const userLineH = isClean16x9 ? Math.round((activeCleanFont - 2) * 1.34) : 23;
+  const avatarSize = isClean16x9 ? (isXL ? 48 : 42) : 28;
+  const avatarGap = isClean16x9 ? 18 : isMobile ? 12 : 16;
+
+  const basePalette = getSkinPalette(config.skin, config.theme);
+  const palette: SkinPalette =
+    isClean16x9 && config.theme === 'dark'
+      ? {
+          ...basePalette,
+          canvasBg: '#000000',
+          userBubbleBg: '#1E1E1E',
+          userBubbleBorder: '#2C2C2E',
+          composerBg: '#1E1E1E',
+          composerBorder: '#2C2C2E',
+          avatarBg: '#1E1E1E',
+          avatarBorder: '#2C2C2E',
+          textPrimary: '#F3F4F6',
+          textSecondary: '#A1A1AA',
+          textMuted: '#71717A',
+        }
+      : basePalette;
+
   const skinMeta = AI_SKINS[config.skin];
   const displayModel = config.modelLabel.trim() || skinMeta.defaultModel;
   const sidebarW = config.showSidebar && !isMobile ? 196 : 0;
@@ -1945,11 +1976,11 @@ export function renderChatFrameToCanvas(
   const composerLeft = chatAreaX + (chatAreaW - composerOuterW) / 2;
   const isTwoRowComposer =
     !isClean16x9 && (config.skin === 'claude' || config.skin === 'grok');
-  const composerFontSize = isClean16x9 ? 20 : 15;
-  const composerLineH = isClean16x9 ? 29 : 22;
+  const composerFontSize = isClean16x9 ? 23 : 15;
+  const composerLineH = isClean16x9 ? 32 : 22;
   const composerTextMaxW = isTwoRowComposer
     ? Math.max(80, composerOuterW - 32)
-    : Math.max(80, composerOuterW - (isClean16x9 ? 152 : 118));
+    : Math.max(80, composerOuterW - (isClean16x9 ? 156 : 118));
 
   let composerLines: string[] = [];
   let composerBoxH = 0;
@@ -1965,15 +1996,15 @@ export function renderChatFrameToCanvas(
     const textH = Math.max(composerLineH, composerLines.length * composerLineH);
     composerBoxH = isTwoRowComposer
       ? textH + 54
-      : textH + (isClean16x9 ? 28 : isMobile ? 18 : 22);
+      : textH + (isClean16x9 ? 26 : isMobile ? 18 : 22);
   }
 
-  const disclaimerH = config.showFooterDisclaimer ? (isClean16x9 ? 26 : 24) : 0;
+  const disclaimerH = config.showFooterDisclaimer ? 24 : 0;
   const composerPadBottom = config.showBottomBar
     ? config.showFooterDisclaimer
-      ? 6
+      ? 4
       : isClean16x9
-        ? 18
+        ? 14
         : isMobile
           ? 18
           : 24
@@ -1981,7 +2012,7 @@ export function renderChatFrameToCanvas(
       ? 12
       : 0;
   const bottomChromeH =
-    (config.showBottomBar ? composerBoxH + 8 : 0) +
+    (config.showBottomBar ? composerBoxH + 6 : 0) +
     disclaimerH +
     composerPadBottom;
   const scrollViewportH = Math.max(
@@ -1997,9 +2028,9 @@ export function renderChatFrameToCanvas(
       : Math.min(chatAreaW, 680);
   const contentOriginX = chatAreaX + (chatAreaW - contentContainerW) / 2;
   const padX = isClean16x9 ? 22 : isMobile ? 16 : 24;
-  const padTop = isClean16x9 ? 20 : isMobile ? 16 : 22;
-  const padBottom = isClean16x9 ? 20 : isMobile ? 18 : 22;
-  const msgGap = isClean16x9 ? 30 : isMobile ? 22 : 28;
+  const padTop = isClean16x9 ? 16 : isMobile ? 16 : 22;
+  const padBottom = isClean16x9 ? 16 : isMobile ? 18 : 22;
+  const msgGap = isClean16x9 ? 22 : isMobile ? 22 : 28;
   const bodyX = contentOriginX + padX;
   const bodyW = contentContainerW - padX * 2;
 
@@ -2027,13 +2058,13 @@ export function renderChatFrameToCanvas(
       const font = `400 ${msgFontSize}px ${INTER_FONT}`;
 
       if (config.skin === 'claude') {
-        const innerPadX = isClean16x9 ? 18 : 14;
+        const innerPadX = isClean16x9 ? 20 : 14;
         const innerPadY = isClean16x9 ? 14 : 11;
-        const uCircleOffset = isClean16x9 ? 46 : 36;
+        const uCircleOffset = isClean16x9 ? 53 : 36;
         const textMaxW = bodyW - innerPadX * 2 - uCircleOffset;
         const lines = wrapPlainText(ctx, msg.content || ' ', textMaxW, font);
         const bubbleH = Math.max(
-          isClean16x9 ? 56 : 44,
+          isClean16x9 ? 66 : 44,
           lines.length * userLineH + innerPadY * 2
         );
         layoutItems.push({
@@ -2048,8 +2079,8 @@ export function renderChatFrameToCanvas(
         });
         cursorContentY += attH + bubbleH;
       } else {
-        const maxBubbleW = bodyW * (isClean16x9 ? 0.76 : isMobile ? 0.8 : 0.7);
-        const innerPadX = isClean16x9 ? 22 : isMobile ? 16 : 18;
+        const maxBubbleW = bodyW * (isClean16x9 ? 0.82 : isMobile ? 0.8 : 0.7);
+        const innerPadX = isClean16x9 ? 24 : isMobile ? 16 : 18;
         const innerPadY = isClean16x9 ? 14 : isMobile ? 10 : 11;
         const lines = wrapPlainText(
           ctx,
@@ -2062,7 +2093,7 @@ export function renderChatFrameToCanvas(
         for (const l of lines) {
           maxLineW = Math.max(maxLineW, ctx.measureText(l).width);
         }
-        const bubbleW = Math.min(maxBubbleW, Math.max(52, maxLineW + innerPadX * 2));
+        const bubbleW = Math.min(maxBubbleW, Math.max(60, maxLineW + innerPadX * 2));
         const bubbleH = lines.length * userLineH + innerPadY * 2;
         layoutItems.push({
           kind: 'user',
@@ -2090,16 +2121,16 @@ export function renderChatFrameToCanvas(
         palette,
         getBodyFontFamily(effectiveSender),
         false,
-        textScale
+        activeCleanFont
       );
-      const senderBadgeH = config.skin === 'multi' ? (isClean16x9 ? 31 : 24) : 0;
+      const senderBadgeH = config.skin === 'multi' ? (isClean16x9 ? 33 : 24) : 0;
       const thoughtH =
         config.enableThoughtPill && msg.thoughtDuration?.trim()
           ? isClean16x9
             ? 44
             : 36
           : 0;
-      const actionsH = msg.isStreaming ? 0 : isClean16x9 ? 32 : 25;
+      const actionsH = msg.isStreaming ? 0 : isClean16x9 ? 31 : 25;
       const itemH = Math.max(
         avatarSize,
         senderBadgeH + thoughtH + mdRes.height + actionsH
@@ -2181,9 +2212,9 @@ export function renderChatFrameToCanvas(
       }
 
       if (config.skin === 'claude') {
-        const innerPadX = isClean16x9 ? 18 : 14;
+        const innerPadX = isClean16x9 ? 20 : 14;
         const innerPadY = isClean16x9 ? 14 : 11;
-        const uCircleR = isClean16x9 ? 16 : 12;
+        const uCircleR = isClean16x9 ? 19 : 12;
         const uCircleCx = bodyX + innerPadX + uCircleR;
         const uCircleCy = textBubbleY + innerPadY + uCircleR;
 
@@ -2206,7 +2237,7 @@ export function renderChatFrameToCanvas(
         ctx.arc(uCircleCx, uCircleCy, uCircleR, 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = '#ffffff';
-        ctx.font = `600 ${isClean16x9 ? 14 : 11}px ${INTER_FONT}`;
+        ctx.font = `600 ${isClean16x9 ? 16 : 11}px ${INTER_FONT}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('U', uCircleCx, uCircleCy + 0.5);
@@ -2214,7 +2245,7 @@ export function renderChatFrameToCanvas(
 
         ctx.fillStyle = palette.textPrimary;
         ctx.font = `400 ${msgFontSize}px ${INTER_FONT}`;
-        const textOffsetX = innerPadX + uCircleR * 2 + (isClean16x9 ? 14 : 12);
+        const textOffsetX = innerPadX + uCircleR * 2 + (isClean16x9 ? 15 : 12);
         item.userLines.forEach((line, li) => {
           ctx.fillText(
             line,
@@ -2229,7 +2260,7 @@ export function renderChatFrameToCanvas(
               ? 18
               : 14
             : isClean16x9
-              ? 26
+              ? 28
               : 22;
         const bx = bodyX + bodyW - item.bubbleW;
         ctx.fillStyle = palette.userBubbleBg;
@@ -2244,7 +2275,7 @@ export function renderChatFrameToCanvas(
         ctx.fillStyle = palette.textPrimary;
         ctx.font = `400 ${msgFontSize}px ${INTER_FONT}`;
         ctx.textBaseline = 'middle';
-        const innerPadX = isClean16x9 ? 22 : isMobile ? 16 : 18;
+        const innerPadX = isClean16x9 ? 24 : isMobile ? 16 : 18;
         const innerPadY = isClean16x9 ? 14 : isMobile ? 10 : 11;
         item.userLines.forEach((line, li) => {
           ctx.fillText(
@@ -2267,7 +2298,7 @@ export function renderChatFrameToCanvas(
         ctx,
         effectiveSender,
         bodyX,
-        drawY + 1,
+        drawY + 2,
         palette,
         item.msg.customSenderColor,
         item.msg.customSenderIcon,
@@ -2278,12 +2309,12 @@ export function renderChatFrameToCanvas(
 
       if (config.skin === 'multi') {
         const badge = getSenderBadgeMeta(item.msg, config.skin, config.theme);
-        const badgeFontSize = isClean16x9 ? 13.5 : 11;
-        const badgeH = isClean16x9 ? 24 : 19;
+        const badgeFontSize = isClean16x9 ? 14 : 11;
+        const badgeH = isClean16x9 ? 26 : 19;
         ctx.font = `600 ${badgeFontSize}px ${INTER_FONT}`;
-        const bw = ctx.measureText(badge.label).width + (isClean16x9 ? 18 : 14);
+        const bw = ctx.measureText(badge.label).width + (isClean16x9 ? 20 : 14);
         ctx.fillStyle = badge.badgeBg;
-        roundedRectPath(ctx, mdX, contentDrawY, bw, badgeH, isClean16x9 ? 7 : 6);
+        roundedRectPath(ctx, mdX, contentDrawY, bw, badgeH, isClean16x9 ? 8 : 6);
         ctx.fill();
         ctx.strokeStyle = badge.badgeBorder;
         ctx.lineWidth = 1;
@@ -2292,7 +2323,7 @@ export function renderChatFrameToCanvas(
         ctx.textBaseline = 'middle';
         ctx.fillText(
           badge.label,
-          mdX + (isClean16x9 ? 9 : 7),
+          mdX + (isClean16x9 ? 10 : 7),
           contentDrawY + badgeH / 2 + 0.5
         );
         contentDrawY += badgeH + (isClean16x9 ? 7 : 5);
@@ -2300,13 +2331,13 @@ export function renderChatFrameToCanvas(
 
       if (config.enableThoughtPill && item.msg.thoughtDuration?.trim()) {
         const thoughtLabel = `Thought for ${item.msg.thoughtDuration.trim()}`;
-        const thoughtFontSize = isClean16x9 ? 15 : 12.5;
+        const thoughtFontSize = isClean16x9 ? 16 : 12.5;
         ctx.font = `500 ${thoughtFontSize}px ${INTER_FONT}`;
         const tw = ctx.measureText(thoughtLabel).width;
-        const pillW = tw + (isClean16x9 ? 40 : 34);
-        const pillH = isClean16x9 ? 32 : 26;
+        const pillW = tw + (isClean16x9 ? 42 : 34);
+        const pillH = isClean16x9 ? 34 : 26;
         ctx.fillStyle = palette.thoughtBg;
-        roundedRectPath(ctx, mdX, contentDrawY, pillW, pillH, 9);
+        roundedRectPath(ctx, mdX, contentDrawY, pillW, pillH, 10);
         ctx.fill();
         ctx.strokeStyle = palette.thoughtBorder;
         ctx.lineWidth = 1;
@@ -2325,7 +2356,7 @@ export function renderChatFrameToCanvas(
           mdX + (isClean16x9 ? 12 : 10) + tw + 6,
           contentDrawY + pillH / 2 - (isClean16x9 ? 6 : 5)
         );
-        const chevScale = isClean16x9 ? 12 / 24 : 10 / 24;
+        const chevScale = isClean16x9 ? 13 / 24 : 10 / 24;
         ctx.scale(chevScale, chevScale);
         ctx.strokeStyle = palette.thoughtText;
         ctx.lineWidth = 2.4;
@@ -2338,7 +2369,7 @@ export function renderChatFrameToCanvas(
         ctx.stroke();
         ctx.restore();
 
-        contentDrawY += pillH + (isClean16x9 ? 12 : 10);
+        contentDrawY += pillH + 10;
       }
 
       const res = processMarkdownBlock(
@@ -2350,7 +2381,7 @@ export function renderChatFrameToCanvas(
         palette,
         getBodyFontFamily(effectiveSender),
         true,
-        textScale
+        activeCleanFont
       );
 
       if (item.msg.isStreaming) {
@@ -2362,7 +2393,7 @@ export function renderChatFrameToCanvas(
         ctx.fillStyle =
           effectiveSender === 'claude' ? '#d97757' : res.cursorColor;
         ctx.beginPath();
-        ctx.arc(res.cursorX + (isClean16x9 ? 11 : 9), res.cursorY, isClean16x9 ? 5 : 4, 0, Math.PI * 2);
+        ctx.arc(res.cursorX + (isClean16x9 ? 12 : 9), res.cursorY, isClean16x9 ? 6 : 4, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       } else {
@@ -2370,10 +2401,10 @@ export function renderChatFrameToCanvas(
           ctx,
           effectiveSender,
           mdX,
-          contentDrawY + res.height + (isClean16x9 ? 12 : 10),
+          contentDrawY + res.height + 10,
           palette.textMuted,
-          isClean16x9 ? 19 : 15,
-          isClean16x9 ? 34 : 27
+          isClean16x9 ? 21 : 15,
+          isClean16x9 ? 39 : 27
         );
       }
     } else if (item.kind === 'thinking') {
@@ -2393,7 +2424,7 @@ export function renderChatFrameToCanvas(
         0.28 +
         0.72 * (0.5 + 0.5 * Math.cos((frame.timeMs / 1000) * Math.PI * 2));
       const dotScale = 0.84 + 0.16 * pulse;
-      const dotRadius = isClean16x9 ? 7 : 5.5;
+      const dotRadius = isClean16x9 ? 7.5 : 5.5;
       ctx.save();
       ctx.globalAlpha = pulse;
       ctx.fillStyle =
@@ -2489,7 +2520,6 @@ export function renderChatFrameToCanvas(
       drawGhostIcon(ctx, logicalWidth - 68, headerCenterY - 9.5, 19, palette.textSecondary);
       drawNewChatIcon(ctx, logicalWidth - 38, headerCenterY - 9.5, 19, palette.textSecondary);
     } else {
-      // ChatGPT or Multi-AI
       if (isMobile) {
         drawHamburgerIcon(ctx, 16, headerCenterY - 10, palette.textSecondary);
         ctx.font = `600 16px ${INTER_FONT}`;
@@ -2540,7 +2570,7 @@ export function renderChatFrameToCanvas(
       composerTop,
       composerOuterW,
       composerBoxH,
-      isTwoRowComposer ? 18 : isClean16x9 ? 32 : 26
+      isTwoRowComposer ? 18 : isClean16x9 ? 34 : 26
     );
     ctx.fill();
     ctx.strokeStyle = palette.composerBorder;
@@ -2629,11 +2659,11 @@ export function renderChatFrameToCanvas(
         ctx.restore();
       }
     } else {
-      const leftPad = isClean16x9 ? 20 : isMobile ? 14 : 16;
+      const leftPad = isClean16x9 ? 22 : isMobile ? 14 : 16;
       const rightPad = isClean16x9 ? 14 : isMobile ? 10 : 12;
-      const compIconSize = isClean16x9 ? 23 : 18;
-      const sendRadius = isClean16x9 ? 19 : 15;
-      const sendArrowSize = isClean16x9 ? 19 : 15;
+      const compIconSize = isClean16x9 ? 24 : 18;
+      const sendRadius = isClean16x9 ? 20 : 15;
+      const sendArrowSize = isClean16x9 ? 20 : 15;
       const barCenterY = composerTop + composerBoxH / 2;
 
       if (config.skin === 'gemini') {
@@ -2659,7 +2689,7 @@ export function renderChatFrameToCanvas(
       ctx.textBaseline = 'middle';
       if (frame.composerDraft) {
         ctx.fillStyle = palette.textPrimary;
-        const topTextY = composerTop + (isClean16x9 ? 14 : isMobile ? 9 : 11);
+        const topTextY = composerTop + (isClean16x9 ? 13 : isMobile ? 9 : 11);
         composerLines.forEach((line, li) => {
           ctx.fillText(
             line,
@@ -2722,7 +2752,7 @@ export function renderChatFrameToCanvas(
   if (config.showFooterDisclaimer) {
     ctx.save();
     ctx.fillStyle = palette.textMuted;
-    ctx.font = `400 ${isClean16x9 ? 13.5 : 11.5}px ${INTER_FONT}`;
+    ctx.font = `400 ${isClean16x9 ? 14 : 11.5}px ${INTER_FONT}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(
