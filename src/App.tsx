@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { LayoutLabLogo } from './components/ChatGptIcons';
 import {
+  type CleanFontSize,
   EditorPanel,
   type MessageSenderPatch,
 } from './components/EditorPanel';
@@ -86,6 +87,7 @@ export default function App() {
   const [theme, setTheme] = useState<ThemeMode>('light');
   const [device, setDevice] = useState<DeviceMode>('desktop');
   const [previewMode, setPreviewMode] = useState<PreviewMode>('standard');
+  const [cleanFontSize, setCleanFontSize] = useState<CleanFontSize>(28);
   const [showHeader, setShowHeader] = useState<boolean>(true);
   const [showSidebar, setShowSidebar] = useState<boolean>(false);
   const [showIosStatusBar, setShowIosStatusBar] = useState<boolean>(true);
@@ -273,7 +275,6 @@ export default function App() {
       const runId = playbackRunIdRef.current + 1;
       playbackRunIdRef.current = runId;
 
-      // Build unit-speed timeline (speed 1.5 === 1.0x unit rate) and advance via rAF timestamp accumulator
       const timeline = buildAnimationTimeline(
         scriptSnapshot,
         1.5,
@@ -301,7 +302,6 @@ export default function App() {
 
         const rawDelta = prevTs === null ? 0 : Math.max(0, now - prevTs);
         prevTs = now;
-        // Clamp frame delta to 28ms (even at 2x speed = 1.5x unit rate -> <=42ms < 45ms/word, zero skipped words)
         const safeDelta = Math.min(rawDelta, 28);
         accumulatedUnitMs +=
           safeDelta * getEffectivePlaybackMultiplier(speedRef.current);
@@ -325,7 +325,6 @@ export default function App() {
         if (sig !== lastSignature) {
           lastSignature = sig;
 
-          // Preserve object identity for unchanged completed messages so React.memo skips them
           const nextMessages: ChatMessage[] = frame.messages.map((fm, idx) => {
             const existing = prevRenderedMessages[idx];
             if (
@@ -625,6 +624,7 @@ export default function App() {
           theme,
           device,
           previewMode,
+          cleanFontSize,
           showHeader,
           showSidebar,
           showIosStatusBar,
@@ -661,6 +661,7 @@ export default function App() {
       }
     },
     [
+      cleanFontSize,
       device,
       enableThoughtPill,
       modelLabel,
@@ -824,6 +825,8 @@ export default function App() {
             device={device}
             onDeviceChange={setDevice}
             previewMode={previewMode}
+            cleanFontSize={cleanFontSize}
+            onCleanFontSizeChange={setCleanFontSize}
             showHeader={showHeader}
             onShowHeaderChange={setShowHeader}
             showSidebar={showSidebar}
@@ -874,6 +877,7 @@ export default function App() {
           device={device}
           previewMode={previewMode}
           onPreviewModeChange={handlePreviewModeChange}
+          cleanFontSize={cleanFontSize}
           showHeader={showHeader}
           showSidebar={showSidebar}
           showIosStatusBar={showIosStatusBar}
