@@ -97,7 +97,16 @@ const AssistantMessageContent = React.memo(function AssistantMessageContent({
       className={`chatgpt-markdown ${theme === 'dark' ? 'theme-dark' : 'theme-light'} ${
         senderSkin === 'claude' ? 'skin-claude-serif' : ''
       } ${isClean16x9 ? 'clean16x9-markdown' : ''}`}
-      style={{ color: textColor }}
+      style={{
+        color: textColor,
+        ...(isClean16x9
+          ? {
+              fontSize: '26px',
+              lineHeight: 1.42,
+              letterSpacing: '-0.01em',
+            }
+          : {}),
+      }}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
@@ -118,7 +127,7 @@ function SkinAssistantAvatar({
   customIcon?: CustomAiIconId;
   isClean16x9?: boolean;
 }) {
-  const boxSize = isClean16x9 ? '36px' : '28px';
+  const boxSize = isClean16x9 ? '42px' : '28px';
 
   if (senderSkin === 'claude') {
     return (
@@ -130,10 +139,10 @@ function SkinAssistantAvatar({
           alignItems: 'center',
           justifyContent: 'center',
           flexShrink: 0,
-          marginTop: '1px',
+          marginTop: '2px',
         }}
       >
-        <ClaudeStarburstIcon size={isClean16x9 ? 26 : 20} color="#d97757" />
+        <ClaudeStarburstIcon size={isClean16x9 ? 30 : 20} color="#d97757" />
       </div>
     );
   }
@@ -148,10 +157,10 @@ function SkinAssistantAvatar({
           alignItems: 'center',
           justifyContent: 'center',
           flexShrink: 0,
-          marginTop: '1px',
+          marginTop: '2px',
         }}
       >
-        <GeminiSparkIcon size={isClean16x9 ? 26 : 20} gradientId={gradientId} />
+        <GeminiSparkIcon size={isClean16x9 ? 30 : 20} gradientId={gradientId} />
       </div>
     );
   }
@@ -169,12 +178,12 @@ function SkinAssistantAvatar({
           alignItems: 'center',
           justifyContent: 'center',
           flexShrink: 0,
-          marginTop: '1px',
+          marginTop: '2px',
         }}
       >
         <CustomAiGlyphIcon
           icon={customIcon || 'sparkles'}
-          size={isClean16x9 ? 19 : 15}
+          size={isClean16x9 ? 22 : 15}
         />
       </div>
     );
@@ -193,13 +202,13 @@ function SkinAssistantAvatar({
         alignItems: 'center',
         justifyContent: 'center',
         flexShrink: 0,
-        marginTop: '1px',
+        marginTop: '2px',
       }}
     >
       {senderSkin === 'grok' ? (
-        <GrokSlashXIcon size={isClean16x9 ? 22 : 17} />
+        <GrokSlashXIcon size={isClean16x9 ? 25 : 17} />
       ) : (
-        <OpenAISwirlIcon size={isClean16x9 ? 21 : 16} />
+        <OpenAISwirlIcon size={isClean16x9 ? 24 : 16} />
       )}
     </div>
   );
@@ -214,12 +223,12 @@ function SkinActionIcons({
   mutedColor: string;
   isClean16x9?: boolean;
 }) {
-  const iconSize = isClean16x9 ? 19 : 15;
-  const googleSize = isClean16x9 ? 18 : 14;
+  const iconSize = isClean16x9 ? 21 : 15;
+  const googleSize = isClean16x9 ? 20 : 14;
   const rowStyle: React.CSSProperties = {
     display: 'flex',
     alignItems: 'center',
-    gap: isClean16x9 ? '15px' : '12px',
+    gap: isClean16x9 ? '18px' : '12px',
     marginTop: isClean16x9 ? '12px' : '10px',
     color: mutedColor,
   };
@@ -287,7 +296,6 @@ function SkinActionIcons({
     );
   }
 
-  // ChatGPT: Copy, Thumbs Up, Thumbs Down, Speaker, Regenerate, Share
   return (
     <div style={rowStyle}>
       <span style={{ display: 'inline-flex' }} title="Copy">
@@ -370,7 +378,7 @@ function AttachmentPreview({
           backgroundColor: palette.attachmentCardBg,
           border: `1px solid ${palette.attachmentCardBorder}`,
           color: palette.textPrimary,
-          fontSize: isClean16x9 ? '15px' : '12.5px',
+          fontSize: isClean16x9 ? '16px' : '12.5px',
           fontWeight: 500,
         }}
       >
@@ -415,7 +423,7 @@ function ThoughtPillBlock({
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div style={{ marginBottom: isClean16x9 ? '12px' : '10px' }}>
+    <div style={{ marginBottom: isClean16x9 ? '10px' : '10px' }}>
       <button
         type="button"
         onClick={() => setExpanded((prev) => !prev)}
@@ -428,7 +436,7 @@ function ThoughtPillBlock({
           backgroundColor: palette.thoughtBg,
           border: `1px solid ${palette.thoughtBorder}`,
           color: palette.thoughtText,
-          fontSize: isClean16x9 ? '15px' : '12.5px',
+          fontSize: isClean16x9 ? '16px' : '12.5px',
           fontWeight: 500,
           cursor: 'pointer',
           lineHeight: 1.3,
@@ -442,7 +450,7 @@ function ThoughtPillBlock({
             transition: 'transform 150ms ease',
           }}
         >
-          <ChevronRightIcon size={isClean16x9 ? 15 : 12} />
+          <ChevronRightIcon size={isClean16x9 ? 16 : 12} />
         </span>
       </button>
 
@@ -455,7 +463,7 @@ function ThoughtPillBlock({
             backgroundColor: palette.thoughtBg,
             border: `1px solid ${palette.thoughtBorder}`,
             color: palette.thoughtText,
-            fontSize: isClean16x9 ? '15px' : '12.5px',
+            fontSize: isClean16x9 ? '16px' : '12.5px',
             lineHeight: 1.5,
           }}
         >
@@ -531,24 +539,24 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
               border: `1px solid ${palette.userBubbleBorder}`,
               color: palette.textPrimary,
               borderRadius: isClean16x9 ? '18px' : '14px',
-              padding: isClean16x9 ? '14px 18px' : '11px 14px',
-              fontSize: isClean16x9 ? '20px' : '15px',
-              lineHeight: isClean16x9 ? 1.5 : 1.55,
+              padding: isClean16x9 ? '14px 20px' : '11px 14px',
+              fontSize: isClean16x9 ? '25px' : '15px',
+              lineHeight: isClean16x9 ? 1.4 : 1.55,
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
             }}
           >
             <div
               style={{
-                width: isClean16x9 ? '32px' : '24px',
-                height: isClean16x9 ? '32px' : '24px',
+                width: isClean16x9 ? '36px' : '24px',
+                height: isClean16x9 ? '36px' : '24px',
                 borderRadius: '9999px',
                 backgroundColor: isDark ? '#57544c' : '#2b2a27',
                 color: '#ffffff',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                fontSize: isClean16x9 ? '14px' : '11px',
+                fontSize: isClean16x9 ? '16px' : '11px',
                 fontWeight: 600,
                 flexShrink: 0,
               }}
@@ -583,7 +591,7 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
         >
           <div
             style={{
-              maxWidth: isClean16x9 ? '76%' : isMobile ? '80%' : '70%',
+              maxWidth: isClean16x9 ? '80%' : isMobile ? '80%' : '70%',
               backgroundColor: palette.userBubbleBg,
               border:
                 skin === 'grok' || skin === 'multi'
@@ -596,15 +604,15 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
                     ? '18px'
                     : '14px'
                   : isClean16x9
-                    ? '26px'
+                    ? '28px'
                     : '22px',
               padding: isClean16x9
-                ? '14px 22px'
+                ? '14px 24px'
                 : isMobile
                   ? '10px 16px'
                   : '11px 18px',
-              fontSize: isClean16x9 ? '20px' : '15px',
-              lineHeight: isClean16x9 ? 1.5 : 1.55,
+              fontSize: isClean16x9 ? '25px' : '15px',
+              lineHeight: isClean16x9 ? 1.4 : 1.55,
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
             }}
@@ -636,7 +644,7 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
       style={{
         display: 'flex',
         alignItems: 'flex-start',
-        gap: isClean16x9 ? '20px' : isMobile ? '12px' : '16px',
+        gap: isClean16x9 ? '18px' : isMobile ? '12px' : '16px',
         width: '100%',
       }}
     >
@@ -656,13 +664,13 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
-                height: isClean16x9 ? '24px' : '19px',
-                padding: isClean16x9 ? '0 9px' : '0 7px',
-                borderRadius: isClean16x9 ? '7px' : '6px',
+                height: isClean16x9 ? '26px' : '19px',
+                padding: isClean16x9 ? '0 10px' : '0 7px',
+                borderRadius: isClean16x9 ? '8px' : '6px',
                 backgroundColor: senderBadge.badgeBg,
                 color: senderBadge.badgeText,
                 border: `1px solid ${senderBadge.badgeBorder}`,
-                fontSize: isClean16x9 ? '13.5px' : '11px',
+                fontSize: isClean16x9 ? '14px' : '11px',
                 fontWeight: 600,
                 lineHeight: 1,
               }}
@@ -798,7 +806,6 @@ export function PreviewCanvas({
   const feedStackRef = useRef<HTMLDivElement | null>(null);
   const [overflowOffset, setOverflowOffset] = useState<number>(0);
 
-  // Measure upward overflow inside the strict 16:9 Clean Focus viewport
   useLayoutEffect(() => {
     if (!isClean16x9) {
       setOverflowOffset(0);
@@ -845,7 +852,27 @@ export function PreviewCanvas({
     container.scrollTop = container.scrollHeight;
   }, [isClean16x9, isPlaying, messages, isThinking, composerDraft]);
 
-  const palette = useMemo(() => getSkinPalette(skin, theme), [skin, theme]);
+  // Apply pure #000000 OLED Dark Mode palette automatically in 16:9 Clean Focus Dark Mode
+  const palette = useMemo(() => {
+    const base = getSkinPalette(skin, theme);
+    if (isClean16x9 && isDark) {
+      return {
+        ...base,
+        canvasBg: '#000000',
+        userBubbleBg: '#1E1E1E',
+        userBubbleBorder: '#2C2C2E',
+        composerBg: '#1E1E1E',
+        composerBorder: '#2C2C2E',
+        avatarBg: '#1E1E1E',
+        avatarBorder: '#2C2C2E',
+        textPrimary: '#F3F4F6',
+        textSecondary: '#A1A1AA',
+        textMuted: '#71717A',
+      };
+    }
+    return base;
+  }, [skin, theme, isClean16x9, isDark]);
+
   const skinMeta = AI_SKINS[skin];
   const displayModel = modelLabel.trim() || skinMeta.defaultModel;
   const composerPlaceholder =
@@ -866,6 +893,30 @@ export function PreviewCanvas({
         isTheaterMode ? 'justify-center min-h-screen' : ''
       }`}
     >
+      {/* Inline override for 26px viral YouTube readability inside 16:9 Clean Focus */}
+      {isClean16x9 && (
+        <style>{`
+          .clean16x9-markdown,
+          .clean16x9-markdown p,
+          .clean16x9-markdown li,
+          .clean16x9-markdown blockquote {
+            font-size: 26px !important;
+            line-height: 1.42 !important;
+          }
+          .clean16x9-markdown h1 { font-size: 32px !important; }
+          .clean16x9-markdown h2 { font-size: 29px !important; }
+          .clean16x9-markdown h3 { font-size: 27px !important; }
+          .clean16x9-markdown pre,
+          .clean16x9-markdown pre code {
+            font-size: 21px !important;
+            line-height: 1.4 !important;
+          }
+          .clean16x9-markdown :not(pre) > code {
+            font-size: 23px !important;
+          }
+        `}</style>
+      )}
+
       {/* Studio Stage Info Bar + Preview Mode Switcher (Outside Capture Area) */}
       {!isTheaterMode && (
         <div
@@ -1250,7 +1301,7 @@ export function PreviewCanvas({
                     maxWidth: isClean16x9 || isMobile ? '100%' : '680px',
                     margin: '0 auto',
                     padding: isClean16x9
-                      ? '20px 22px'
+                      ? '16px 22px'
                       : isMobile
                         ? '16px 16px 24px 16px'
                         : '22px 24px 28px 24px',
@@ -1258,7 +1309,7 @@ export function PreviewCanvas({
                     display: 'flex',
                     flexDirection: 'column',
                     flex: messages.length === 0 && !isThinking ? 1 : undefined,
-                    gap: isClean16x9 ? '30px' : isMobile ? '22px' : '28px',
+                    gap: isClean16x9 ? '22px' : isMobile ? '22px' : '28px',
                     transform:
                       isClean16x9 && overflowOffset > 0
                         ? `translateY(-${overflowOffset}px)`
@@ -1284,7 +1335,7 @@ export function PreviewCanvas({
                         <span
                           className={skin === 'claude' ? 'skin-claude-serif' : undefined}
                           style={{
-                            fontSize: isClean16x9 ? '32px' : isMobile ? '22px' : '26px',
+                            fontSize: isClean16x9 ? '34px' : isMobile ? '22px' : '26px',
                             fontWeight: skin === 'claude' ? 500 : 600,
                             letterSpacing: '-0.02em',
                             color: palette.textPrimary,
@@ -1336,7 +1387,7 @@ export function PreviewCanvas({
                           style={{
                             display: 'flex',
                             alignItems: 'center',
-                            gap: isClean16x9 ? '20px' : isMobile ? '12px' : '16px',
+                            gap: isClean16x9 ? '18px' : isMobile ? '12px' : '16px',
                             width: '100%',
                           }}
                         >
@@ -1374,8 +1425,8 @@ export function PreviewCanvas({
                     margin: '0 auto',
                     padding: isClean16x9
                       ? showFooterDisclaimer
-                        ? '6px 22px'
-                        : '6px 22px 18px 22px'
+                        ? '4px 22px'
+                        : '4px 22px 14px 22px'
                       : showFooterDisclaimer
                         ? isMobile
                           ? '4px 14px 6px 14px'
@@ -1557,9 +1608,9 @@ export function PreviewCanvas({
                         backgroundColor: palette.composerBg,
                         border: `1px solid ${palette.composerBorder}`,
                         boxShadow: palette.composerShadow,
-                        borderRadius: isClean16x9 ? '32px' : '26px',
+                        borderRadius: isClean16x9 ? '34px' : '26px',
                         padding: isClean16x9
-                          ? '13px 14px 13px 20px'
+                          ? '12px 14px 12px 22px'
                           : isMobile
                             ? '8px 10px 8px 14px'
                             : '10px 12px 10px 16px',
@@ -1583,17 +1634,17 @@ export function PreviewCanvas({
                           }}
                         >
                           {skin === 'gemini' ? (
-                            <PlusIcon size={isClean16x9 ? 23 : 18} />
+                            <PlusIcon size={isClean16x9 ? 25 : 18} />
                           ) : (
-                            <PaperclipIcon size={isClean16x9 ? 23 : 18} />
+                            <PaperclipIcon size={isClean16x9 ? 25 : 18} />
                           )}
                         </span>
                         {isPlaying && composerDraft ? (
                           <span
                             style={{
                               color: palette.textPrimary,
-                              fontSize: isClean16x9 ? '20px' : '15px',
-                              lineHeight: 1.45,
+                              fontSize: isClean16x9 ? '23px' : '15px',
+                              lineHeight: 1.4,
                               whiteSpace: 'pre-wrap',
                               wordBreak: 'break-word',
                             }}
@@ -1604,7 +1655,7 @@ export function PreviewCanvas({
                           <span
                             style={{
                               color: palette.textMuted,
-                              fontSize: isClean16x9 ? '20px' : '15px',
+                              fontSize: isClean16x9 ? '23px' : '15px',
                               whiteSpace: 'nowrap',
                               overflow: 'hidden',
                               textOverflow: 'ellipsis',
@@ -1632,15 +1683,15 @@ export function PreviewCanvas({
                           }}
                         >
                           {skin === 'gemini' ? (
-                            <MicIcon size={isClean16x9 ? 23 : 18} />
+                            <MicIcon size={isClean16x9 ? 25 : 18} />
                           ) : (
-                            <VoiceWaveformIcon size={isClean16x9 ? 23 : 18} />
+                            <VoiceWaveformIcon size={isClean16x9 ? 25 : 18} />
                           )}
                         </span>
                         <span
                           style={{
-                            width: isClean16x9 ? '38px' : '30px',
-                            height: isClean16x9 ? '38px' : '30px',
+                            width: isClean16x9 ? '42px' : '30px',
+                            height: isClean16x9 ? '42px' : '30px',
                             borderRadius: '9999px',
                             backgroundColor: sendHighlighted
                               ? '#10a37f'
@@ -1657,7 +1708,7 @@ export function PreviewCanvas({
                               'transform 140ms ease, background-color 140ms ease, box-shadow 140ms ease',
                           }}
                         >
-                          <SendArrowIcon size={isClean16x9 ? 19 : 15} />
+                          <SendArrowIcon size={isClean16x9 ? 21 : 15} />
                         </span>
                       </div>
                     </div>
@@ -1671,9 +1722,9 @@ export function PreviewCanvas({
                   style={{
                     textAlign: 'center',
                     color: palette.textMuted,
-                    fontSize: isClean16x9 ? '13.5px' : '11.5px',
+                    fontSize: isClean16x9 ? '14px' : '11.5px',
                     padding: isClean16x9
-                      ? '2px 22px 14px'
+                      ? '2px 22px 12px'
                       : isMobile
                         ? '2px 14px 12px'
                         : '2px 24px 14px',
