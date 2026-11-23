@@ -84,7 +84,7 @@ function getBodyFontFamily(skin: MessageSenderSkin | AiSkin): string {
 
 export async function preloadAttachmentImages(
   messages: ChatMessage[]
-): Promise> {
+): Promise<Map<string,HTMLImageElement>>{
   const cache = new Map<string, HTMLImageElement>();
   const tasks: Promise<void>[] = [];
 
