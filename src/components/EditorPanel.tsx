@@ -59,6 +59,8 @@ const CUSTOM_ICON_IDS: readonly CustomAiIconId[] = [
   'globe',
 ] as const;
 
+export type CleanFontSize = 26 | 28 | 34;
+
 export interface MessageSenderPatch {
   role?: MessageRole;
   senderSkin?: MessageSenderSkin;
@@ -77,6 +79,8 @@ interface EditorPanelProps {
   device: DeviceMode;
   onDeviceChange: (device: DeviceMode) => void;
   previewMode: PreviewMode;
+  cleanFontSize: CleanFontSize;
+  onCleanFontSizeChange: (size: CleanFontSize) => void;
   showHeader: boolean;
   onShowHeaderChange: (show: boolean) => void;
   showSidebar: boolean;
@@ -204,6 +208,8 @@ export const EditorPanel = React.memo(function EditorPanel({
   device,
   onDeviceChange,
   previewMode,
+  cleanFontSize,
+  onCleanFontSizeChange,
   showHeader,
   onShowHeaderChange,
   showSidebar,
@@ -466,6 +472,45 @@ export const EditorPanel = React.memo(function EditorPanel({
                   Mobile
                 </button>
               </div>
+            </div>
+          </div>
+
+          {/* 16:9 Clean Focus Font Size Toggle */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="block text-xs font-medium text-slate-700">
+                16:9 Chat Font Size
+              </span>
+              <span className="text-[11px] text-slate-400">
+                Preview &amp; Export
+              </span>
+            </div>
+            <div
+              role="group"
+              aria-label="16:9 Chat Font Size"
+              className="grid grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1"
+            >
+              {(
+                [
+                  { size: 26, label: '26px (Compact)' },
+                  { size: 28, label: '28px (Viral)' },
+                  { size: 34, label: '34px (XL)' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.size}
+                  type="button"
+                  disabled={isRecording}
+                  onClick={() => onCleanFontSizeChange(opt.size)}
+                  className={`rounded-md py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 whitespace-nowrap cursor-pointer ${
+                    cleanFontSize === opt.size
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
             </div>
           </div>
 
