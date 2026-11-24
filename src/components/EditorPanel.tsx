@@ -2,8 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
+  Bell,
   ChevronDown,
   ChevronRight,
+  Clock,
   Download,
   FileText,
   Film,
@@ -20,6 +22,8 @@ import {
   Square,
   Sun,
   Trash2,
+  Type,
+  Upload,
   Video,
   X,
 } from 'lucide-react';
@@ -28,6 +32,8 @@ import {
   type AnimationFormat,
   type ChatMessage,
   CUSTOM_AI_COLORS,
+  CUSTOM_ICON_IDS,
+  CUSTOM_SENDER_PRESETS,
   type CustomAiIconId,
   type DeviceMode,
   type ImageFormat,
@@ -37,6 +43,7 @@ import {
   PLAYBACK_SPEEDS,
   type PlaybackSpeed,
   type PreviewMode,
+  type StageOverlay,
   type ThemeMode,
   type VideoQuality,
 } from '../types';
@@ -50,15 +57,6 @@ import {
   OpenAISwirlIcon,
 } from './ChatGptIcons';
 
-const CUSTOM_ICON_IDS: readonly CustomAiIconId[] = [
-  'sparkles',
-  'bot',
-  'zap',
-  'cpu',
-  'terminal',
-  'globe',
-] as const;
-
 export type CleanFontSize = 26 | 28 | 34;
 
 export interface MessageSenderPatch {
@@ -67,6 +65,8 @@ export interface MessageSenderPatch {
   customSenderName?: string;
   customSenderColor?: string;
   customSenderIcon?: CustomAiIconId;
+  customSenderAvatar?: string;
+  systemAnimate?: boolean;
 }
 
 interface EditorPanelProps {
@@ -107,6 +107,13 @@ interface EditorPanelProps {
   onDeleteMessage: (id: string) => void;
   onClearAll: () => void;
   onLoadSample: () => void;
+  overlays: StageOverlay[];
+  selectedOverlayId: string | null;
+  onSelectOverlay: (id: string | null) => void;
+  onAddTextOverlay: () => void;
+  onAddImageOverlayFile: (file: File) => void;
+  onDeleteOverlay: (id: string) => void;
+  onMoveOverlay: (index: number, direction: 'up' | 'down') => void;
   onExportImage: (format: ImageFormat) => void;
   onExportAnimation: (format: AnimationFormat) => void;
   onExportVideo: () => void;
@@ -233,6 +240,13 @@ export const EditorPanel = React.memo(function EditorPanel({
   onDeleteMessage,
   onClearAll,
   onLoadSample,
+  overlays,
+  selectedOverlayId,
+  onSelectOverlay,
+  onAddTextOverlay,
+  onAddImageOverlayFile,
+  onDeleteOverlay,
+  onMoveOverlay,
   onExportImage,
   onExportAnimation,
   onExportVideo,
@@ -257,6 +271,8 @@ export const EditorPanel = React.memo(function EditorPanel({
   const [realismDrawerOpen, setRealismDrawerOpen] = useState<boolean>(true);
   const menusContainerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const avatarInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const overlayImgInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!openMenu) return;
@@ -316,6 +332,54 @@ export const EditorPanel = React.memo(function EditorPanel({
         sizeLabel,
       });
     }
+  };
+
+  const handleAvatarPicked = (
+    msgId: string,
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || !file.type.startsWith('image/')) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') return;
+      const rawUrl = reader.result;
+      const img = new Image();
+      img.onload = () => {
+        const size = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          onUpdateMessageSender(msgId, { customSenderAvatar: rawUrl });
+          return;
+        }
+        const aspect = img.naturalWidth / Math.max(1, img.naturalHeight);
+        let sx = 0;
+        let sy = 0;
+        let sw = img.naturalWidth;
+        let sh = img.naturalHeight;
+        if (aspect > 1) {
+          sw = img.naturalHeight;
+          sx = (img.naturalWidth - sw) / 2;
+        } else if (aspect < 1) {
+          sh = img.naturalWidth;
+          sy = (img.naturalHeight - sh) / 2;
+        }
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, size, size);
+        onUpdateMessageSender(msgId, {
+          customSenderAvatar: canvas.toDataURL('image/png'),
+        });
+      };
+      img.onerror = () => {
+        onUpdateMessageSender(msgId, { customSenderAvatar: rawUrl });
+      };
+      img.src = rawUrl;
+    };
+    reader.readAsDataURL(file);
   };
 
   return (
@@ -592,6 +656,140 @@ export const EditorPanel = React.memo(function EditorPanel({
           </div>
         </section>
 
+        {/* Section 1.5: 16:9 Stage Overlays (Only in 16:9 Clean Focus Mode) */}
+        {isClean16x9 && (
+          <>
+            <hr className="border-slate-200" />
+            <section aria-labelledby="overlays-heading" className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h2
+                  id="overlays-heading"
+                  className="text-xs font-semibold tracking-wide text-slate-500 uppercase"
+                >
+                  16:9 Stage Overlays
+                </h2>
+                <span className="text-[11px] font-medium text-slate-400 tabular-nums">
+                  {overlays.length} {overlays.length === 1 ? 'item' : 'items'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={isPlaying || isRecording}
+                  onClick={onAddTextOverlay}
+                  className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                >
+                  <Type className="h-3.5 w-3.5" />
+                  + Add Text Box
+                </button>
+                <input
+                  ref={overlayImgInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (file) onAddImageOverlayFile(file);
+                  }}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  disabled={isPlaying || isRecording}
+                  onClick={() => overlayImgInputRef.current?.click()}
+                  className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                >
+                  <ImageIcon className="h-3.5 w-3.5" />
+                  + Insert Image
+                </button>
+              </div>
+
+              {overlays.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-slate-200 bg-slate-50/70 px-3 py-2.5 text-[11.5px] leading-relaxed text-slate-500">
+                  Add draggable text boxes or image popups, then drag &amp; resize
+                  directly on the 16:9 stage.
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {overlays.map((ov, idx) => {
+                    const active = selectedOverlayId === ov.id;
+                    return (
+                      <div
+                        key={ov.id}
+                        onClick={() => onSelectOverlay(ov.id)}
+                        className={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-2 transition-colors cursor-pointer ${
+                          active
+                            ? 'border-blue-500 bg-blue-50/60'
+                            : 'border-slate-200 bg-white hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-700">
+                            {ov.kind === 'text' ? (
+                              <Type className="h-3.5 w-3.5" />
+                            ) : (
+                              <ImageIcon className="h-3.5 w-3.5" />
+                            )}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-semibold text-slate-800">
+                              {ov.kind === 'text'
+                                ? ov.text?.trim() || 'Text Box'
+                                : ov.imageName || 'Image Overlay'}
+                            </p>
+                            <p className="flex items-center gap-1 text-[10.5px] text-slate-500 tabular-nums">
+                              <Clock className="h-2.5 w-2.5" />
+                              {ov.timingMode === 'full'
+                                ? 'Full Video'
+                                : `${ov.startSec.toFixed(1)}s–${ov.endSec.toFixed(1)}s (${ov.transition})`}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div
+                          className="flex items-center gap-0.5 shrink-0"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            disabled={idx === 0}
+                            onClick={() => onMoveOverlay(idx, 'up')}
+                            aria-label="Move overlay down layer"
+                            title="Send Backward"
+                            className="rounded p-1 text-slate-400 hover:bg-slate-200/70 hover:text-slate-800 disabled:opacity-30 cursor-pointer"
+                          >
+                            <ArrowUp className="h-3 w-3" />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={idx === overlays.length - 1}
+                            onClick={() => onMoveOverlay(idx, 'down')}
+                            aria-label="Move overlay up layer"
+                            title="Bring Forward"
+                            className="rounded p-1 text-slate-400 hover:bg-slate-200/70 hover:text-slate-800 disabled:opacity-30 cursor-pointer"
+                          >
+                            <ArrowDown className="h-3 w-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onDeleteOverlay(ov.id)}
+                            aria-label="Delete overlay"
+                            title="Delete"
+                            className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 cursor-pointer"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </>
+        )}
+
         <hr className="border-slate-200" />
 
         {/* Section 2: Script Builder (Word-for-Word Message List) */}
@@ -625,23 +823,31 @@ export const EditorPanel = React.memo(function EditorPanel({
             </div>
           </div>
 
-          {/* Top Add Prompt / Add AI Reply Buttons */}
-          <div className="grid grid-cols-2 gap-2">
+          {/* Top Add Prompt / Add AI Reply / Add Event Buttons */}
+          <div className="grid grid-cols-3 gap-1.5">
             <button
               type="button"
               onClick={() => onAddMessage('user')}
-              className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50 whitespace-nowrap cursor-pointer"
+              className="flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11.5px] font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50 whitespace-nowrap cursor-pointer"
             >
-              <Plus className="h-3.5 w-3.5" />
-              Add User Prompt
+              <Plus className="h-3.5 w-3.5 shrink-0" />
+              User Prompt
             </button>
             <button
               type="button"
               onClick={() => onAddMessage('assistant')}
-              className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50 whitespace-nowrap cursor-pointer"
+              className="flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11.5px] font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50 whitespace-nowrap cursor-pointer"
             >
-              <Plus className="h-3.5 w-3.5" />
-              Add AI Reply
+              <Plus className="h-3.5 w-3.5 shrink-0" />
+              AI Reply
+            </button>
+            <button
+              type="button"
+              onClick={() => onAddMessage('system')}
+              className="flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11.5px] font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50 whitespace-nowrap cursor-pointer"
+            >
+              <Plus className="h-3.5 w-3.5 shrink-0" />
+              Add Event
             </button>
           </div>
 
@@ -667,14 +873,22 @@ export const EditorPanel = React.memo(function EditorPanel({
             <div className="space-y-3">
               {messages.map((msg, index) => {
                 const isUser = msg.role === 'user';
-                const currentSenderValue = isUser
-                  ? 'user'
-                  : (msg.senderSkin ?? 'chatgpt');
+                const isSystem = msg.role === 'system';
+                const isAssistant = msg.role === 'assistant';
+                const currentSenderValue = isSystem
+                  ? 'system'
+                  : isUser
+                    ? 'user'
+                    : (msg.senderSkin ?? 'chatgpt');
 
                 return (
                   <div
                     key={msg.id}
-                    className="rounded-xl border border-slate-200 bg-white p-3.5 transition-colors focus-within:border-slate-400"
+                    className={`rounded-xl border p-3.5 transition-colors focus-within:border-slate-400 ${
+                      isSystem
+                        ? 'border-slate-200 bg-slate-50/70'
+                        : 'border-slate-200 bg-white'
+                    }`}
                   >
                     {/* Card Header */}
                     <div className="mb-2.5 flex items-center justify-between gap-2">
@@ -688,9 +902,14 @@ export const EditorPanel = React.memo(function EditorPanel({
 
                         {skin === 'multi' ? (
                           <div className="flex items-center gap-1.5 min-w-0">
-                            {!isUser && (
+                            {isSystem && (
+                              <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500">
+                                <Bell className="h-3 w-3" />
+                              </span>
+                            )}
+                            {isAssistant && (
                               <span
-                                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-slate-200"
+                                className="inline-flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-200"
                                 style={
                                   msg.senderSkin === 'custom'
                                     ? {
@@ -703,11 +922,20 @@ export const EditorPanel = React.memo(function EditorPanel({
                                     : undefined
                                 }
                               >
-                                <SkinMiniIcon
-                                  skin={msg.senderSkin ?? 'chatgpt'}
-                                  size={11}
-                                  customIcon={msg.customSenderIcon}
-                                />
+                                {msg.senderSkin === 'custom' &&
+                                msg.customSenderAvatar ? (
+                                  <img
+                                    src={msg.customSenderAvatar}
+                                    alt=""
+                                    className="h-full w-full object-cover"
+                                  />
+                                ) : (
+                                  <SkinMiniIcon
+                                    skin={msg.senderSkin ?? 'chatgpt'}
+                                    size={11}
+                                    customIcon={msg.customSenderIcon}
+                                  />
+                                )}
                               </span>
                             )}
                             <select
@@ -717,6 +945,11 @@ export const EditorPanel = React.memo(function EditorPanel({
                                 const val = e.target.value;
                                 if (val === 'user') {
                                   onUpdateMessageSender(msg.id, { role: 'user' });
+                                } else if (val === 'system') {
+                                  onUpdateMessageSender(msg.id, {
+                                    role: 'system',
+                                    systemAnimate: msg.systemAnimate ?? true,
+                                  });
                                 } else {
                                   const nextSender = val as MessageSenderSkin;
                                   onUpdateMessageSender(msg.id, {
@@ -741,9 +974,15 @@ export const EditorPanel = React.memo(function EditorPanel({
                               <option value="claude">Claude</option>
                               <option value="gemini">Gemini</option>
                               <option value="grok">Grok</option>
-                              <option value="custom">Custom AI</option>
+                              <option value="custom">Custom Sender</option>
+                              <option value="system">System Event</option>
                             </select>
                           </div>
+                        ) : isSystem ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600 whitespace-nowrap">
+                            <Bell className="h-3 w-3 text-slate-400" />
+                            System Event
+                          </span>
                         ) : (
                           <button
                             type="button"
@@ -751,7 +990,7 @@ export const EditorPanel = React.memo(function EditorPanel({
                             title={`Click to switch role between User and ${skinMeta.name}`}
                             className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-800 hover:text-slate-600 whitespace-nowrap cursor-pointer"
                           >
-                            {!isUser && (
+                            {isAssistant && (
                               <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-200 text-slate-800">
                                 <SkinMiniIcon skin={skin} size={10} />
                               </span>
@@ -794,61 +1033,188 @@ export const EditorPanel = React.memo(function EditorPanel({
                       </div>
                     </div>
 
-                    {/* Multi-AI Custom AI Inline Configuration */}
-                    {skin === 'multi' &&
-                      !isUser &&
-                      msg.senderSkin === 'custom' && (
-                        <div className="mb-2.5 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                    {/* System Event Quick Presets & Entrance Animation Toggle */}
+                    {isSystem && (
+                      <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-1">
+                          {[
+                            'ChatGPT joined the chat',
+                            'Claude joined the chat',
+                            'Mom joined the chat',
+                          ].map((presetText) => (
+                            <button
+                              key={presetText}
+                              type="button"
+                              onClick={() => onUpdateMessage(msg.id, presetText)}
+                              className="rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[10.5px] font-medium text-slate-600 transition-colors hover:border-slate-300 hover:text-slate-900 cursor-pointer"
+                            >
+                              {presetText.replace(' the chat', '')}
+                            </button>
+                          ))}
+                        </div>
+
+                        <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-600 cursor-pointer">
                           <input
-                            type="text"
-                            value={msg.customSenderName ?? ''}
+                            type="checkbox"
+                            checked={msg.systemAnimate !== false}
                             onChange={(e) =>
                               onUpdateMessageSender(msg.id, {
-                                customSenderName: e.target.value,
+                                systemAnimate: e.target.checked,
                               })
                             }
-                            placeholder="Custom AI name (e.g. DeepSeek, Perplexity)..."
-                            aria-label="Custom AI name"
-                            className="h-7 w-full rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-800 outline-none focus:border-slate-400"
+                            className="h-3.5 w-3.5 rounded border-slate-300 accent-slate-900"
                           />
+                          <span>Entrance anim</span>
+                        </label>
+                      </div>
+                    )}
 
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div
-                              className="flex items-center gap-1.5"
-                              aria-label="Custom AI badge color"
+                    {/* Multi-AI Custom Sender Inline Configuration (Presets, Custom Name, Color Picker, 12 Icons, Custom Avatar Upload) */}
+                    {skin === 'multi' &&
+                      isAssistant &&
+                      msg.senderSkin === 'custom' && (
+                        <div className="mb-2.5 space-y-2.5 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                          {/* Quick Sender Presets */}
+                          <div className="flex flex-wrap items-center gap-1">
+                            {CUSTOM_SENDER_PRESETS.map((preset) => (
+                              <button
+                                key={preset.label}
+                                type="button"
+                                onClick={() =>
+                                  onUpdateMessageSender(msg.id, {
+                                    customSenderName: preset.name,
+                                    customSenderColor: preset.color,
+                                    customSenderIcon: preset.icon,
+                                    customSenderAvatar: undefined,
+                                  })
+                                }
+                                className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[10.5px] font-semibold text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-100 cursor-pointer"
+                              >
+                                <span
+                                  className="h-2 w-2 rounded-full"
+                                  style={{ backgroundColor: preset.color }}
+                                />
+                                {preset.label}
+                              </button>
+                            ))}
+                          </div>
+
+                          {/* Custom Name + Avatar Upload Row */}
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={msg.customSenderName ?? ''}
+                              onChange={(e) =>
+                                onUpdateMessageSender(msg.id, {
+                                  customSenderName: e.target.value,
+                                })
+                              }
+                              placeholder="Custom name (e.g. DeepSeek, Mom, Boss)..."
+                              aria-label="Custom sender name"
+                              className="h-7 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-800 outline-none focus:border-slate-400"
+                            />
+
+                            <input
+                              ref={(el) => {
+                                avatarInputRefs.current[msg.id] = el;
+                              }}
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => handleAvatarPicked(msg.id, e)}
+                              className="hidden"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                avatarInputRefs.current[msg.id]?.click()
+                              }
+                              className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-semibold text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-100 cursor-pointer"
                             >
-                              {CUSTOM_AI_COLORS.map((swatch) => {
-                                const selected =
-                                  (msg.customSenderColor ||
-                                    CUSTOM_AI_COLORS[0]) === swatch;
-                                return (
-                                  <button
-                                    key={swatch}
-                                    type="button"
-                                    onClick={() =>
-                                      onUpdateMessageSender(msg.id, {
-                                        customSenderColor: swatch,
-                                      })
-                                    }
-                                    aria-label={`Select color ${swatch}`}
-                                    className={`h-5 w-5 rounded-full transition-transform cursor-pointer ${
-                                      selected
-                                        ? 'ring-2 ring-slate-900 ring-offset-1 scale-110'
-                                        : 'hover:scale-105'
-                                    }`}
-                                    style={{ backgroundColor: swatch }}
-                                  />
-                                );
-                              })}
-                            </div>
+                              <Upload className="h-3 w-3" />
+                              {msg.customSenderAvatar ? 'Change' : 'Avatar'}
+                            </button>
 
+                            {msg.customSenderAvatar && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateMessageSender(msg.id, {
+                                    customSenderAvatar: undefined,
+                                  })
+                                }
+                                title="Remove custom avatar image"
+                                aria-label="Remove custom avatar image"
+                                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-red-200 bg-red-50 text-red-600 transition-colors hover:bg-red-100 cursor-pointer"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Badge Color Swatches + Custom Color Picker */}
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-[10.5px] font-semibold text-slate-500">
+                              Color
+                            </span>
+                            {CUSTOM_AI_COLORS.map((swatch) => {
+                              const selected =
+                                (msg.customSenderColor ||
+                                  CUSTOM_AI_COLORS[0]) === swatch;
+                              return (
+                                <button
+                                  key={swatch}
+                                  type="button"
+                                  onClick={() =>
+                                    onUpdateMessageSender(msg.id, {
+                                      customSenderColor: swatch,
+                                    })
+                                  }
+                                  aria-label={`Select color ${swatch}`}
+                                  className={`h-5 w-5 rounded-full transition-transform cursor-pointer ${
+                                    selected
+                                      ? 'ring-2 ring-slate-900 ring-offset-1 scale-110'
+                                      : 'hover:scale-105'
+                                  }`}
+                                  style={{ backgroundColor: swatch }}
+                                />
+                              );
+                            })}
+                            <input
+                              type="color"
+                              aria-label="Pick any custom badge color"
+                              value={
+                                msg.customSenderColor || CUSTOM_AI_COLORS[0]
+                              }
+                              onChange={(e) =>
+                                onUpdateMessageSender(msg.id, {
+                                  customSenderColor: e.target.value,
+                                })
+                              }
+                              className="h-5 w-6 cursor-pointer rounded border border-slate-300 bg-white p-0"
+                            />
+                          </div>
+
+                          {/* Built-in Icon Picker (shown when no custom avatar overrides, or pickable anytime) */}
+                          <div className="space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10.5px] font-semibold text-slate-500">
+                                Built-in Icon
+                              </span>
+                              {msg.customSenderAvatar && (
+                                <span className="text-[10px] text-slate-400">
+                                  Custom image active (click icon to switch)
+                                </span>
+                              )}
+                            </div>
                             <div
-                              className="flex items-center gap-1"
-                              aria-label="Custom AI icon"
+                              className="grid grid-cols-6 gap-1"
+                              aria-label="Custom sender icon"
                             >
                               {CUSTOM_ICON_IDS.map((iconId) => {
                                 const activeIcon =
-                                  (msg.customSenderIcon || 'sparkles') === iconId;
+                                  !msg.customSenderAvatar &&
+                                  (msg.customSenderIcon || 'sparkles') ===
+                                    iconId;
                                 return (
                                   <button
                                     key={iconId}
@@ -856,10 +1222,12 @@ export const EditorPanel = React.memo(function EditorPanel({
                                     onClick={() =>
                                       onUpdateMessageSender(msg.id, {
                                         customSenderIcon: iconId,
+                                        customSenderAvatar: undefined,
                                       })
                                     }
                                     aria-label={`Select ${iconId} icon`}
-                                    className={`inline-flex h-6 w-6 items-center justify-center rounded-md border transition-colors cursor-pointer ${
+                                    title={iconId}
+                                    className={`inline-flex h-6 items-center justify-center rounded-md border transition-colors cursor-pointer ${
                                       activeIcon
                                         ? 'border-slate-900 bg-slate-900 text-white'
                                         : 'border-slate-200 bg-white text-slate-600 hover:text-slate-900'
@@ -875,7 +1243,7 @@ export const EditorPanel = React.memo(function EditorPanel({
                       )}
 
                     {/* Optional "Thought for Xs >" input on AI Reply cards */}
-                    {!isUser && enableThoughtPill && (
+                    {isAssistant && enableThoughtPill && (
                       <div className="mb-2 flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5">
                         <span className="text-[11px] font-medium text-slate-600 whitespace-nowrap">
                           Thought for
@@ -942,41 +1310,59 @@ export const EditorPanel = React.memo(function EditorPanel({
                       </div>
                     )}
 
-                    {/* Word-for-Word Message Textarea */}
-                    <textarea
-                      value={msg.content}
-                      onChange={(e) => onUpdateMessage(msg.id, e.target.value)}
-                      rows={isUser ? 2 : 6}
-                      placeholder={
-                        isUser
-                          ? 'Type the exact user prompt...'
-                          : 'Write the exact AI reply (supports **bold**, bullet lists, and ```code``` blocks)...'
-                      }
-                      className={`w-full resize-y rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2 text-[13px] leading-relaxed text-slate-900 placeholder-slate-400 outline-none transition-colors focus:border-slate-400 focus:bg-white ${
-                        !isUser ? 'font-mono text-[12.5px]' : ''
-                      }`}
-                    />
+                    {/* Word-for-Word Message Input / Textarea */}
+                    {isSystem ? (
+                      <input
+                        type="text"
+                        value={msg.content}
+                        onChange={(e) => onUpdateMessage(msg.id, e.target.value)}
+                        placeholder="e.g. ChatGPT joined the chat, Mom joined the chat..."
+                        className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-[13px] font-medium text-slate-800 placeholder-slate-400 outline-none transition-colors focus:border-slate-400"
+                      />
+                    ) : (
+                      <textarea
+                        value={msg.content}
+                        onChange={(e) => onUpdateMessage(msg.id, e.target.value)}
+                        rows={isUser ? 2 : 6}
+                        placeholder={
+                          isUser
+                            ? 'Type the exact user prompt...'
+                            : 'Write the exact AI reply (supports **bold**, bullet lists, and ```code``` blocks)...'
+                        }
+                        className={`w-full resize-y rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2 text-[13px] leading-relaxed text-slate-900 placeholder-slate-400 outline-none transition-colors focus:border-slate-400 focus:bg-white ${
+                          isAssistant ? 'font-mono text-[12.5px]' : ''
+                        }`}
+                      />
+                    )}
                   </div>
                 );
               })}
 
               {/* Bottom Quick-Add Row */}
-              <div className="grid grid-cols-2 gap-2 pt-1">
+              <div className="grid grid-cols-3 gap-1.5 pt-1">
                 <button
                   type="button"
                   onClick={() => onAddMessage('user')}
-                  className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-900 whitespace-nowrap cursor-pointer"
+                  className="flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-[11.5px] font-medium text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-900 whitespace-nowrap cursor-pointer"
                 >
-                  <Plus className="h-3.5 w-3.5" />
-                  Add User Prompt
+                  <Plus className="h-3.5 w-3.5 shrink-0" />
+                  User Prompt
                 </button>
                 <button
                   type="button"
                   onClick={() => onAddMessage('assistant')}
-                  className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-900 whitespace-nowrap cursor-pointer"
+                  className="flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-[11.5px] font-medium text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-900 whitespace-nowrap cursor-pointer"
                 >
-                  <Plus className="h-3.5 w-3.5" />
-                  Add AI Reply
+                  <Plus className="h-3.5 w-3.5 shrink-0" />
+                  AI Reply
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onAddMessage('system')}
+                  className="flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-[11.5px] font-medium text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-900 whitespace-nowrap cursor-pointer"
+                >
+                  <Plus className="h-3.5 w-3.5 shrink-0" />
+                  Add Event
                 </button>
               </div>
             </div>
@@ -1193,7 +1579,7 @@ export const EditorPanel = React.memo(function EditorPanel({
                     <button
                       type="button"
                       onClick={() => onVideoQualityChange('1080p')}
-                      className={`rounded-md py-1 text-[11px] font-semibold transition-colors whitespace-nowrap ${
+                      className={`rounded-md py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
                         videoQuality === '1080p'
                           ? 'bg-white text-slate-900 shadow-xs'
                           : 'text-slate-600 hover:text-slate-900'
@@ -1204,7 +1590,7 @@ export const EditorPanel = React.memo(function EditorPanel({
                     <button
                       type="button"
                       onClick={() => onVideoQualityChange('4k')}
-                      className={`rounded-md py-1 text-[11px] font-semibold transition-colors whitespace-nowrap ${
+                      className={`rounded-md py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
                         videoQuality === '4k'
                           ? 'bg-white text-slate-900 shadow-xs'
                           : 'text-slate-600 hover:text-slate-900'
@@ -1222,7 +1608,7 @@ export const EditorPanel = React.memo(function EditorPanel({
                     setOpenMenu(null);
                     onExportAnimation('mp4');
                   }}
-                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-800 transition-colors hover:bg-slate-100"
+                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-800 transition-colors hover:bg-slate-100 cursor-pointer"
                 >
                   <span>MP4 Video (60 FPS)</span>
                   <Download className="h-3.5 w-3.5 text-slate-400 shrink-0" />
@@ -1234,7 +1620,7 @@ export const EditorPanel = React.memo(function EditorPanel({
                     setOpenMenu(null);
                     onExportAnimation('webm');
                   }}
-                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-800 transition-colors hover:bg-slate-100"
+                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-800 transition-colors hover:bg-slate-100 cursor-pointer"
                 >
                   <span>WebM Video (60 FPS)</span>
                   <Download className="h-3.5 w-3.5 text-slate-400 shrink-0" />
@@ -1246,7 +1632,7 @@ export const EditorPanel = React.memo(function EditorPanel({
                     setOpenMenu(null);
                     onExportAnimation('gif');
                   }}
-                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-800 transition-colors hover:bg-slate-100"
+                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-800 transition-colors hover:bg-slate-100 cursor-pointer"
                 >
                   <span>Animated GIF (Smooth)</span>
                   <Download className="h-3.5 w-3.5 text-slate-400 shrink-0" />

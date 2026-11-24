@@ -7,8 +7,14 @@ export type CustomAiIconId =
   | 'zap'
   | 'cpu'
   | 'terminal'
-  | 'globe';
-export type MessageRole = 'user' | 'assistant';
+  | 'globe'
+  | 'user'
+  | 'heart'
+  | 'flame'
+  | 'crown'
+  | 'brain'
+  | 'ghost';
+export type MessageRole = 'user' | 'assistant' | 'system';
 export type PreviewMode = 'standard' | 'clean16x9';
 
 export interface MessageAttachment {
@@ -29,7 +35,55 @@ export interface ChatMessage {
   customSenderName?: string;
   customSenderColor?: string;
   customSenderIcon?: CustomAiIconId;
+  customSenderAvatar?: string;
+  systemAnimate?: boolean;
 }
+
+export interface ThinkingSenderInfo {
+  senderSkin: MessageSenderSkin;
+  customSenderName?: string;
+  customSenderColor?: string;
+  customSenderIcon?: CustomAiIconId;
+  customSenderAvatar?: string;
+}
+
+export type OverlayKind = 'text' | 'image';
+export type OverlayFontFamily = 'sans' | 'display' | 'serif' | 'mono';
+export type OverlayTimingMode = 'full' | 'timed';
+export type OverlayTransition = 'none' | 'fade' | 'pop';
+
+export interface StageOverlay {
+  id: string;
+  kind: OverlayKind;
+  /** Logical 960x540 stage coordinates */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Text box styling */
+  text?: string;
+  fontFamily?: OverlayFontFamily;
+  fontSize?: number;
+  color?: string;
+  bold?: boolean;
+  italic?: boolean;
+  pillBg?: boolean;
+  pillBgColor?: string;
+  pillBgOpacity?: number;
+  /** Image overlay properties */
+  imageDataUrl?: string;
+  imageName?: string;
+  imageAspectRatio?: number;
+  imageBorderRadius?: number;
+  /** Timing & transitions */
+  timingMode: OverlayTimingMode;
+  startSec: number;
+  endSec: number;
+  transition: OverlayTransition;
+}
+
+export const STAGE_LOGICAL_WIDTH = 960;
+export const STAGE_LOGICAL_HEIGHT = 540;
 
 export type ThemeMode = 'light' | 'dark';
 export type DeviceMode = 'desktop' | 'mobile';
@@ -62,6 +116,59 @@ export const CUSTOM_AI_COLORS: readonly string[] = [
   '#f59e0b',
   '#0ea5e9',
   '#8b5cf6',
+  '#ef4444',
+  '#14b8a6',
+] as const;
+
+export const CUSTOM_ICON_IDS: readonly CustomAiIconId[] = [
+  'sparkles',
+  'bot',
+  'zap',
+  'cpu',
+  'terminal',
+  'globe',
+  'user',
+  'heart',
+  'flame',
+  'crown',
+  'brain',
+  'ghost',
+] as const;
+
+export interface CustomSenderPreset {
+  label: string;
+  name: string;
+  color: string;
+  icon: CustomAiIconId;
+}
+
+export const CUSTOM_SENDER_PRESETS: readonly CustomSenderPreset[] = [
+  { label: 'DeepSeek', name: 'DeepSeek', color: '#4f46e5', icon: 'brain' },
+  { label: 'Perplexity', name: 'Perplexity', color: '#0ea5e9', icon: 'globe' },
+  { label: 'Llama', name: 'Llama 4', color: '#8b5cf6', icon: 'flame' },
+  { label: 'Mom', name: 'Mom', color: '#ec4899', icon: 'heart' },
+  { label: 'Boss', name: 'Boss', color: '#f59e0b', icon: 'crown' },
+  { label: 'Dev', name: 'Senior Dev', color: '#10b981', icon: 'terminal' },
+] as const;
+
+export const OVERLAY_TEXT_COLORS: readonly string[] = [
+  '#ffffff',
+  '#0f172a',
+  '#facc15',
+  '#38bdf8',
+  '#4ade80',
+  '#fb7185',
+  '#c084fc',
+] as const;
+
+export const OVERLAY_PILL_BG_COLORS: readonly string[] = [
+  '#0f172a',
+  '#ffffff',
+  '#dc2626',
+  '#2563eb',
+  '#059669',
+  '#7c3aed',
+  '#ea580c',
 ] as const;
 
 export const INITIAL_MESSAGES: ChatMessage[] = [

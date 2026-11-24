@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Download,
@@ -37,7 +37,11 @@ import {
   MULTI_AI_SAMPLE_MESSAGES,
   type PlaybackSpeed,
   type PreviewMode,
+  STAGE_LOGICAL_HEIGHT,
+  STAGE_LOGICAL_WIDTH,
+  type StageOverlay,
   type ThemeMode,
+  type ThinkingSenderInfo,
   type VideoQuality,
 } from './types';
 import { exportCleanImage } from './utils/exportPng';
@@ -46,6 +50,11 @@ import {
   startNativeAnimationExport,
 } from './utils/exportVideo';
 import { buildAnimationTimeline } from './utils/nativeCanvasRenderer';
+import {
+  createDefaultTextOverlay,
+  createImageOverlayFromFile,
+  createOverlayId,
+} from './utils/overlays';
 import { AI_SKINS } from './utils/skins';
 import type { ScriptTemplate } from './utils/templates';
 import {
@@ -109,9 +118,17 @@ export default function App() {
   const [playbackSpeed, setPlaybackSpeed] = useState<PlaybackSpeed>(1);
   const [displayedMessages, setDisplayedMessages] = useState<ChatMessage[]>([]);
   const [isThinking, setIsThinking] = useState<boolean>(false);
+  const [thinkingSender, setThinkingSender] =
+    useState<ThinkingSenderInfo | null>(null);
+  const [playbackTimeSec, setPlaybackTimeSec] = useState<number>(0);
+  const [scrubTimeSec, setScrubTimeSec] = useState<number | null>(null);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const [composerDraft, setComposerDraft] = useState<string>('');
   const [sendHighlighted, setSendHighlighted] = useState<boolean>(false);
+
+  // 16:9 Stage Overlays (full-time or timed text boxes & image popups)
+  const [overlays, setOverlays] = useState<StageOverlay[]>([]);
+  const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
 
   const captureRef = useRef<HTMLDivElement | null>(null);
   const playbackRunIdRef = useRef<number>(0);
@@ -122,8 +139,21 @@ export default function App() {
   const isRecordingRef = useRef<boolean>(false);
   const isExportingRef = useRef<boolean>(false);
   const messagesRef = useRef<ChatMessage[]>(messages);
+  const overlaysRef = useRef<StageOverlay[]>(overlays);
   const skinRef = useRef<AiSkin>(skin);
+  const themeRef = useRef<ThemeMode>(theme);
+  const scrubTimeSecRef = useRef<number | null>(scrubTimeSec);
   const animationExportRef = useRef<AnimationExportController | null>(null);
+
+  const totalDurationSec = useMemo(() => {
+    if (messages.length === 0) return 6;
+    const tl = buildAnimationTimeline(messages, playbackSpeed, showBottomBar, {
+      includeFinalHold: true,
+    });
+    return Math.max(1, tl.totalDurationMs / 1000);
+  }, [messages, playbackSpeed, showBottomBar]);
+
+  const totalDurationSecRef = useRef<number>(totalDurationSec);
 
   useEffect(() => {
     speedRef.current = playbackSpeed;
@@ -150,8 +180,24 @@ export default function App() {
   }, [messages]);
 
   useEffect(() => {
+    overlaysRef.current = overlays;
+  }, [overlays]);
+
+  useEffect(() => {
     skinRef.current = skin;
   }, [skin]);
+
+  useEffect(() => {
+    themeRef.current = theme;
+  }, [theme]);
+
+  useEffect(() => {
+    scrubTimeSecRef.current = scrubTimeSec;
+  }, [scrubTimeSec]);
+
+  useEffect(() => {
+    totalDurationSecRef.current = totalDurationSec;
+  }, [totalDurationSec]);
 
   const cancelActiveExport = useCallback(() => {
     if (animationExportRef.current) {
@@ -173,6 +219,9 @@ export default function App() {
     cancelActiveExport();
     setIsPlaying(false);
     setIsThinking(false);
+    setThinkingSender(null);
+    setPlaybackTimeSec(0);
+    setScrubTimeSec(null);
     setStreamingMessageId(null);
     setComposerDraft('');
     setSendHighlighted(false);
@@ -260,7 +309,7 @@ export default function App() {
   );
 
   const startAnimation = useCallback(
-    (overrideMessages?: ChatMessage[]) => {
+    (overrideMessages?: ChatMessage[], startAtSec = 0) => {
       const sourceMessages = overrideMessages ?? messagesRef.current;
       if (sourceMessages.length === 0 || isRecordingRef.current) {
         return;
@@ -275,22 +324,33 @@ export default function App() {
       const runId = playbackRunIdRef.current + 1;
       playbackRunIdRef.current = runId;
 
+      const initialSpeed = speedRef.current;
+      const initialMultiplier = getEffectivePlaybackMultiplier(initialSpeed);
       const timeline = buildAnimationTimeline(
         scriptSnapshot,
-        1.5,
+        initialSpeed,
         showBottomBarRef.current,
-        { includeFinalHold: false }
+        { includeFinalHold: true }
       );
 
+      const clampedStartMs = Math.max(
+        0,
+        Math.min(timeline.totalDurationMs, startAtSec * 1000)
+      );
+
+      setScrubTimeSec(null);
       setIsPlaying(true);
       setDisplayedMessages([]);
       setIsThinking(false);
+      setThinkingSender(null);
+      setPlaybackTimeSec(clampedStartMs / 1000);
       setStreamingMessageId(null);
       setComposerDraft('');
       setSendHighlighted(false);
+      setSelectedOverlayId(null);
 
       let prevTs: number | null = null;
-      let accumulatedUnitMs = 0;
+      let accumulatedMs = clampedStartMs;
       let lastSignature = '';
       let prevRenderedMessages: ChatMessage[] = [];
 
@@ -303,10 +363,16 @@ export default function App() {
         const rawDelta = prevTs === null ? 0 : Math.max(0, now - prevTs);
         prevTs = now;
         const safeDelta = Math.min(rawDelta, 28);
-        accumulatedUnitMs +=
-          safeDelta * getEffectivePlaybackMultiplier(speedRef.current);
+        const speedRatio =
+          initialMultiplier > 0
+            ? getEffectivePlaybackMultiplier(speedRef.current) /
+              initialMultiplier
+            : 1;
+        accumulatedMs += safeDelta * speedRatio;
 
-        const frame = timeline.evaluateAt(accumulatedUnitMs);
+        const currentVideoSec = accumulatedMs / 1000;
+
+        const frame = timeline.evaluateAt(accumulatedMs);
         let nextStreamingId: string | null = null;
         for (let i = 0; i < frame.messages.length; i++) {
           if (frame.messages[i].isStreaming) {
@@ -316,9 +382,16 @@ export default function App() {
         }
 
         const lastMsg = frame.messages[frame.messages.length - 1];
+        const thinkSig = frame.thinkingSender
+          ? `${frame.thinkingSender.senderSkin}:${
+              frame.thinkingSender.customSenderName ?? ''
+            }:${frame.thinkingSender.customSenderColor ?? ''}:${
+              frame.thinkingSender.customSenderIcon ?? ''
+            }:${frame.thinkingSender.customSenderAvatar ? 1 : 0}`
+          : '';
         const sig = `${frame.messages.length}|${lastMsg?.id ?? ''}|${
           lastMsg?.content.length ?? 0
-        }|${nextStreamingId ?? ''}|${frame.isThinking ? 1 : 0}|${
+        }|${nextStreamingId ?? ''}|${frame.isThinking ? 1 : 0}|${thinkSig}|${
           frame.composerDraft.length
         }|${frame.sendHighlighted ? 1 : 0}`;
 
@@ -337,7 +410,9 @@ export default function App() {
               existing.senderSkin === fm.senderSkin &&
               existing.customSenderName === fm.customSenderName &&
               existing.customSenderColor === fm.customSenderColor &&
-              existing.customSenderIcon === fm.customSenderIcon
+              existing.customSenderIcon === fm.customSenderIcon &&
+              existing.customSenderAvatar === fm.customSenderAvatar &&
+              existing.systemAnimate === fm.systemAnimate
             ) {
               return existing;
             }
@@ -351,21 +426,29 @@ export default function App() {
               customSenderName: fm.customSenderName,
               customSenderColor: fm.customSenderColor,
               customSenderIcon: fm.customSenderIcon,
+              customSenderAvatar: fm.customSenderAvatar,
+              systemAnimate: fm.systemAnimate,
             };
           });
 
           prevRenderedMessages = nextMessages;
           setDisplayedMessages(nextMessages);
           setIsThinking(frame.isThinking);
+          setThinkingSender(frame.thinkingSender);
           setStreamingMessageId(nextStreamingId);
           setComposerDraft(frame.composerDraft);
           setSendHighlighted(frame.sendHighlighted);
+          setPlaybackTimeSec(currentVideoSec);
+        } else {
+          setPlaybackTimeSec(currentVideoSec);
         }
 
-        if (accumulatedUnitMs >= timeline.totalDurationMs) {
+        if (accumulatedMs >= timeline.totalDurationMs) {
           rafIdRef.current = null;
           setIsPlaying(false);
           setIsThinking(false);
+          setThinkingSender(null);
+          setPlaybackTimeSec(0);
           setStreamingMessageId(null);
           setComposerDraft('');
           setSendHighlighted(false);
@@ -384,9 +467,78 @@ export default function App() {
     if (isPlayingRef.current) {
       stopAnimation();
     } else {
-      startAnimation();
+      const resumeSec =
+        scrubTimeSecRef.current !== null &&
+        scrubTimeSecRef.current < totalDurationSecRef.current - 0.15
+          ? scrubTimeSecRef.current
+          : 0;
+      startAnimation(undefined, resumeSec);
     }
   }, [startAnimation, stopAnimation]);
+
+  const handleScrubTime = useCallback(
+    (sec: number | null) => {
+      if (isPlayingRef.current) {
+        playbackRunIdRef.current += 1;
+        if (rafIdRef.current !== null) {
+          window.cancelAnimationFrame(rafIdRef.current);
+          rafIdRef.current = null;
+        }
+        setIsPlaying(false);
+      }
+
+      if (sec === null || messagesRef.current.length === 0) {
+        setScrubTimeSec(null);
+        setPlaybackTimeSec(0);
+        setDisplayedMessages([]);
+        setIsThinking(false);
+        setThinkingSender(null);
+        setStreamingMessageId(null);
+        setComposerDraft('');
+        setSendHighlighted(false);
+        return;
+      }
+
+      const clampedSec = Math.max(0, Math.min(totalDurationSecRef.current, sec));
+      const timeline = buildAnimationTimeline(
+        messagesRef.current,
+        speedRef.current,
+        showBottomBarRef.current,
+        { includeFinalHold: true }
+      );
+      const frame = timeline.evaluateAt(clampedSec * 1000);
+      let nextStreamingId: string | null = null;
+      for (let i = 0; i < frame.messages.length; i++) {
+        if (frame.messages[i].isStreaming) {
+          nextStreamingId = frame.messages[i].id;
+          break;
+        }
+      }
+      setScrubTimeSec(clampedSec);
+      setPlaybackTimeSec(clampedSec);
+      setDisplayedMessages(
+        frame.messages.map((fm) => ({
+          id: fm.id,
+          role: fm.role,
+          content: fm.content,
+          thoughtDuration: fm.thoughtDuration,
+          attachment: fm.attachment,
+          senderSkin: fm.senderSkin,
+          customSenderName: fm.customSenderName,
+          customSenderColor: fm.customSenderColor,
+          customSenderIcon: fm.customSenderIcon,
+          customSenderAvatar: fm.customSenderAvatar,
+          systemAnimate: fm.systemAnimate,
+        }))
+      );
+      setIsThinking(frame.isThinking);
+      setThinkingSender(frame.thinkingSender);
+      setStreamingMessageId(nextStreamingId);
+      setComposerDraft(frame.composerDraft);
+      setSendHighlighted(frame.sendHighlighted);
+    },
+    []
+  );
 
   const handleLaunchStudio = (targetSkin?: AiSkin) => {
     if (isPlaying || isRecording) stopAnimation();
@@ -439,10 +591,13 @@ export default function App() {
             : undefined,
         thoughtDuration: role === 'assistant' ? '4s' : undefined,
         attachment: null,
+        systemAnimate: role === 'system' ? true : undefined,
         content:
-          role === 'user'
-            ? 'How can I optimize this further?'
-            : 'Here are two clean improvements you can apply right away:\n\n- **Memoize expensive selectors** so child components avoid unnecessary renders.\n- **Batch state updates** inside event handlers for smoother UI responsiveness.',
+          role === 'system'
+            ? 'ChatGPT joined the chat'
+            : role === 'user'
+              ? 'How can I optimize this further?'
+              : 'Here are two clean improvements you can apply right away:\n\n- **Memoize expensive selectors** so child components avoid unnecessary renders.\n- **Batch state updates** inside event handlers for smoother UI responsiveness.',
       };
       setMessages((prev) => [...prev, newMessage]);
     },
@@ -549,6 +704,78 @@ export default function App() {
     );
   }, [stopAnimation]);
 
+  // 16:9 Stage Overlay handlers
+  const handleAddTextOverlay = useCallback(() => {
+    if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+    const next = createDefaultTextOverlay(
+      overlaysRef.current.length,
+      themeRef.current,
+      totalDurationSecRef.current
+    );
+    setOverlays((prev) => [...prev, next]);
+    setSelectedOverlayId(next.id);
+  }, [stopAnimation]);
+
+  const handleAddImageOverlayFile = useCallback(
+    (file: File) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      void createImageOverlayFromFile(
+        file,
+        overlaysRef.current.length,
+        totalDurationSecRef.current
+      )
+        .then((next) => {
+          setOverlays((prev) => [...prev, next]);
+          setSelectedOverlayId(next.id);
+        })
+        .catch(() => {
+          setExportError('Unable to load overlay image file.');
+        });
+    },
+    [stopAnimation]
+  );
+
+  const handleUpdateOverlay = useCallback(
+    (id: string, patch: Partial<StageOverlay>) => {
+      setOverlays((prev) =>
+        prev.map((ov) => (ov.id === id ? { ...ov, ...patch } : ov))
+      );
+    },
+    []
+  );
+
+  const handleDuplicateOverlay = useCallback((id: string) => {
+    const source = overlaysRef.current.find((o) => o.id === id);
+    if (!source) return;
+    const copy: StageOverlay = {
+      ...source,
+      id: createOverlayId(),
+      x: Math.min(STAGE_LOGICAL_WIDTH - source.width - 8, source.x + 22),
+      y: Math.min(STAGE_LOGICAL_HEIGHT - source.height - 8, source.y + 22),
+    };
+    setOverlays((prev) => [...prev, copy]);
+    setSelectedOverlayId(copy.id);
+  }, []);
+
+  const handleDeleteOverlay = useCallback((id: string) => {
+    setOverlays((prev) => prev.filter((o) => o.id !== id));
+    setSelectedOverlayId((prev) => (prev === id ? null : prev));
+  }, []);
+
+  const handleMoveOverlay = useCallback(
+    (index: number, direction: 'up' | 'down') => {
+      setOverlays((prev) => {
+        const targetIndex = direction === 'up' ? index - 1 : index + 1;
+        if (targetIndex < 0 || targetIndex >= prev.length) return prev;
+        const next = [...prev];
+        const [moved] = next.splice(index, 1);
+        next.splice(targetIndex, 0, moved);
+        return next;
+      });
+    },
+    []
+  );
+
   // Dropdown 1: Download Image (PNG / JPG / WEBP of final frame)
   const handleExportImage = useCallback(
     async (format: ImageFormat) => {
@@ -560,8 +787,9 @@ export default function App() {
         return;
       }
       setExportError(null);
+      setSelectedOverlayId(null);
 
-      if (isPlayingRef.current) {
+      if (isPlayingRef.current || scrubTimeSecRef.current !== null) {
         stopAnimation();
         await waitNextFrames(3);
       }
@@ -569,6 +797,7 @@ export default function App() {
       if (!captureRef.current) return;
 
       setIsExporting(true);
+      await waitNextFrames(2);
       try {
         const exportDevice = previewMode === 'clean16x9' ? 'desktop' : device;
         await exportCleanImage(
@@ -589,7 +818,7 @@ export default function App() {
     [device, previewMode, skin, stopAnimation, theme]
   );
 
-  // Dropdown 2 & Direct 4K: Download Animation (60 FPS MP4 / WebM / Smooth GIF via Native Canvas)
+  // Dropdown 2 & Direct 4K: Download Animation (60 FPS MP4 / WebM or Smooth GIF)
   const handleExportAnimation = useCallback(
     async (format: AnimationFormat, overrideQuality?: VideoQuality) => {
       if (
@@ -601,7 +830,7 @@ export default function App() {
       }
       setExportError(null);
 
-      if (isPlayingRef.current) {
+      if (isPlayingRef.current || scrubTimeSecRef.current !== null) {
         stopAnimation();
         await waitNextFrames(2);
       }
@@ -631,6 +860,7 @@ export default function App() {
           showBottomBar,
           showFooterDisclaimer,
           enableThoughtPill,
+          overlays: overlaysRef.current.map((o) => ({ ...o })),
         },
         speed: playbackSpeed,
         quality: effectiveQuality,
@@ -850,6 +1080,13 @@ export default function App() {
             onDeleteMessage={handleDeleteMessage}
             onClearAll={handleClearAll}
             onLoadSample={handleLoadSample}
+            overlays={overlays}
+            selectedOverlayId={selectedOverlayId}
+            onSelectOverlay={setSelectedOverlayId}
+            onAddTextOverlay={handleAddTextOverlay}
+            onAddImageOverlayFile={handleAddImageOverlayFile}
+            onDeleteOverlay={handleDeleteOverlay}
+            onMoveOverlay={handleMoveOverlay}
             onExportImage={handleExportImage}
             onExportAnimation={handleExportAnimationClick}
             onExportVideo={handleExportVideoClick}
@@ -884,14 +1121,31 @@ export default function App() {
           showBottomBar={showBottomBar}
           showFooterDisclaimer={showFooterDisclaimer}
           enableThoughtPill={enableThoughtPill}
-          messages={isPlaying ? displayedMessages : messages}
+          messages={
+            isPlaying || scrubTimeSec !== null ? displayedMessages : messages
+          }
           isPlaying={isPlaying}
+          isExporting={isExporting}
           isThinking={isThinking}
+          thinkingSender={thinkingSender}
           streamingMessageId={streamingMessageId}
           composerDraft={composerDraft}
           sendHighlighted={sendHighlighted}
           lockedMinHeight={null}
           isTheaterMode={isTheaterMode}
+          playbackTimeSec={playbackTimeSec}
+          totalDurationSec={totalDurationSec}
+          scrubTimeSec={scrubTimeSec}
+          onScrubTime={handleScrubTime}
+          onTogglePlayback={handleTogglePlayback}
+          overlays={overlays}
+          selectedOverlayId={selectedOverlayId}
+          onSelectOverlay={setSelectedOverlayId}
+          onAddTextOverlay={handleAddTextOverlay}
+          onAddImageOverlayFile={handleAddImageOverlayFile}
+          onUpdateOverlay={handleUpdateOverlay}
+          onDuplicateOverlay={handleDuplicateOverlay}
+          onDeleteOverlay={handleDeleteOverlay}
         />
       </div>
 

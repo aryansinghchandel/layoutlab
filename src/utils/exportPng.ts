@@ -22,7 +22,8 @@ export async function exportCleanImage(
     await document.fonts.ready;
   }
 
-  const bgColor = getSkinPalette(skin, theme).canvasBg;
+  const bgColor =
+    element.style.backgroundColor || getSkinPalette(skin, theme).canvasBg;
 
   const canvas = await html2canvas(element, {
     scale: 2,

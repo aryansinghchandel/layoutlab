@@ -60,9 +60,10 @@ function yieldToMainThread(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
-function pickVideoMimeType(
-  requested: 'mp4' | 'webm'
-): { mimeType: string; extension: 'mp4' | 'webm' } {
+function pickVideoMimeType(requested: 'mp4' | 'webm'): {
+  mimeType: string;
+  extension: 'mp4' | 'webm';
+} {
   if (typeof MediaRecorder === 'undefined') {
     throw new Error('MediaRecorder is not supported in this browser.');
   }
@@ -341,7 +342,7 @@ export function startNativeAnimationExport(params: {
       throw new Error('Unable to create off-screen 2D canvas.');
     }
 
-    const imageCache = await preloadAttachmentImages(messages);
+    const imageCache = await preloadAttachmentImages(messages, config.overlays);
     if (cancelled) return;
 
     const { width: logicalWidth, height: logicalHeight } =
@@ -717,7 +718,6 @@ export function startNativeAnimationExport(params: {
     }
 
     // Fallback Path (Legacy browsers without WebCodecs):
-    // Still strictly deterministic frame-by-frame (never uses Date.now() / performance.now())
     if (typeof canvas.captureStream !== 'function') {
       throw new Error(
         'Canvas 60 FPS video export is not supported in this browser.'

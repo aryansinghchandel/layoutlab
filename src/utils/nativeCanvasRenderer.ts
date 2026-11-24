@@ -10,8 +10,16 @@ import {
   type MessageSenderSkin,
   type PlaybackSpeed,
   type PreviewMode,
+  type StageOverlay,
   type ThemeMode,
+  type ThinkingSenderInfo,
 } from '../types';
+import {
+  evaluateOverlayVisibility,
+  getOverlayFontStack,
+  getSystemPillColors,
+  hexToRgba,
+} from './overlays';
 import {
   AI_SKINS,
   getSenderBadgeMeta,
@@ -32,6 +40,7 @@ export interface RenderConfig {
   showBottomBar: boolean;
   showFooterDisclaimer: boolean;
   enableThoughtPill: boolean;
+  overlays?: StageOverlay[];
 }
 
 export interface RenderedFrameMessage {
@@ -44,6 +53,8 @@ export interface RenderedFrameMessage {
   customSenderName?: string;
   customSenderColor?: string;
   customSenderIcon?: CustomAiIconId;
+  customSenderAvatar?: string;
+  systemAnimate?: boolean;
   enterProgress: number;
   isStreaming: boolean;
 }
@@ -51,6 +62,7 @@ export interface RenderedFrameMessage {
 export interface AnimationFrameState {
   messages: RenderedFrameMessage[];
   isThinking: boolean;
+  thinkingSender: ThinkingSenderInfo | null;
   composerDraft: string;
   sendHighlighted: boolean;
   timeMs: number;
@@ -83,28 +95,40 @@ function getBodyFontFamily(skin: MessageSenderSkin | AiSkin): string {
 }
 
 export async function preloadAttachmentImages(
-  messages: ChatMessage[]
-): Promise<Map<string,HTMLImageElement>>{
+  messages: ChatMessage[],
+  overlays: StageOverlay[] = []
+): Promise<Map<string, HTMLImageElement>> {
   const cache = new Map<string, HTMLImageElement>();
-  const tasks: Promise<void>[] = [];
+  const urls = new Set<string>();
 
   for (const msg of messages) {
     if (msg.attachment?.kind === 'image' && msg.attachment.dataUrl) {
-      const url = msg.attachment.dataUrl;
-      if (!cache.has(url)) {
-        tasks.push(
-          new Promise<void>((resolve) => {
-            const img = new Image();
-            img.onload = () => {
-              cache.set(url, img);
-              resolve();
-            };
-            img.onerror = () => resolve();
-            img.src = url;
-          })
-        );
-      }
+      urls.add(msg.attachment.dataUrl);
     }
+    if (msg.customSenderAvatar) {
+      urls.add(msg.customSenderAvatar);
+    }
+  }
+
+  for (const ov of overlays) {
+    if (ov.kind === 'image' && ov.imageDataUrl) {
+      urls.add(ov.imageDataUrl);
+    }
+  }
+
+  const tasks: Promise<void>[] = [];
+  for (const url of urls) {
+    tasks.push(
+      new Promise<void>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          cache.set(url, img);
+          resolve();
+        };
+        img.onerror = () => resolve();
+        img.src = url;
+      })
+    );
   }
 
   await Promise.all(tasks);
@@ -132,6 +156,7 @@ interface TimelineSegment {
     | 'user_presend'
     | 'user_send_highlight'
     | 'user_slide'
+    | 'system_enter'
     | 'thinking'
     | 'ai_stream'
     | 'final_hold';
@@ -164,7 +189,17 @@ export function buildAnimationTimeline(
   pushSegment(Math.round(180 / effectiveSpeed), { kind: 'idle', msgIndex: -1 });
 
   messages.forEach((msg, index) => {
-    if (msg.role === 'user') {
+    if (msg.role === 'system') {
+      const animate = msg.systemAnimate !== false;
+      pushSegment(Math.round((animate ? 320 : 60) / effectiveSpeed), {
+        kind: 'system_enter',
+        msgIndex: index,
+      });
+      pushSegment(Math.round((animate ? 380 : 320) / effectiveSpeed), {
+        kind: 'idle',
+        msgIndex: index,
+      });
+    } else if (msg.role === 'user') {
       if (showBottomBar) {
         const chars = Array.from(msg.content);
         if (chars.length > 0) {
@@ -232,6 +267,7 @@ export function buildAnimationTimeline(
 
     const visible: RenderedFrameMessage[] = [];
     let isThinking = false;
+    let thinkingSender: ThinkingSenderInfo | null = null;
     let composerDraft = '';
     let sendHighlighted = false;
 
@@ -253,6 +289,8 @@ export function buildAnimationTimeline(
           customSenderName: m.customSenderName,
           customSenderColor: m.customSenderColor,
           customSenderIcon: m.customSenderIcon,
+          customSenderAvatar: m.customSenderAvatar,
+          systemAnimate: m.systemAnimate,
           enterProgress: 1,
           isStreaming: false,
         });
@@ -260,6 +298,7 @@ export function buildAnimationTimeline(
       return {
         messages: visible,
         isThinking: false,
+        thinkingSender: null,
         composerDraft: '',
         sendHighlighted: false,
         timeMs: clamped,
@@ -281,6 +320,8 @@ export function buildAnimationTimeline(
         customSenderName: m.customSenderName,
         customSenderColor: m.customSenderColor,
         customSenderIcon: m.customSenderIcon,
+        customSenderAvatar: m.customSenderAvatar,
+        systemAnimate: m.systemAnimate,
         enterProgress: 1,
         isStreaming: false,
       });
@@ -292,7 +333,16 @@ export function buildAnimationTimeline(
         : null;
 
     if (currentMsg) {
-      if (activeSeg.kind === 'user_typing' && activeSeg.chars) {
+      if (activeSeg.kind === 'system_enter') {
+        visible.push({
+          id: currentMsg.id,
+          role: 'system',
+          content: currentMsg.content,
+          systemAnimate: currentMsg.systemAnimate,
+          enterProgress: currentMsg.systemAnimate === false ? 1 : localProgress,
+          isStreaming: false,
+        });
+      } else if (activeSeg.kind === 'user_typing' && activeSeg.chars) {
         const count = Math.max(
           1,
           Math.min(
@@ -316,11 +366,19 @@ export function buildAnimationTimeline(
           customSenderName: currentMsg.customSenderName,
           customSenderColor: currentMsg.customSenderColor,
           customSenderIcon: currentMsg.customSenderIcon,
+          customSenderAvatar: currentMsg.customSenderAvatar,
           enterProgress: localProgress,
           isStreaming: false,
         });
       } else if (activeSeg.kind === 'thinking') {
         isThinking = true;
+        thinkingSender = {
+          senderSkin: currentMsg.senderSkin ?? 'chatgpt',
+          customSenderName: currentMsg.customSenderName,
+          customSenderColor: currentMsg.customSenderColor,
+          customSenderIcon: currentMsg.customSenderIcon,
+          customSenderAvatar: currentMsg.customSenderAvatar,
+        };
       } else if (activeSeg.kind === 'ai_stream' && activeSeg.words) {
         const count = Math.max(
           1,
@@ -338,6 +396,7 @@ export function buildAnimationTimeline(
           customSenderName: currentMsg.customSenderName,
           customSenderColor: currentMsg.customSenderColor,
           customSenderIcon: currentMsg.customSenderIcon,
+          customSenderAvatar: currentMsg.customSenderAvatar,
           enterProgress: 1,
           isStreaming: true,
         });
@@ -347,6 +406,7 @@ export function buildAnimationTimeline(
     return {
       messages: visible,
       isThinking,
+      thinkingSender,
       composerDraft,
       sendHighlighted,
       timeMs: clamped,
@@ -413,7 +473,9 @@ function drawAiAvatar(
   palette: SkinPalette,
   customColor?: string,
   customIcon?: CustomAiIconId,
-  avatarSize = 28
+  avatarSize = 28,
+  customAvatar?: string,
+  imageCache?: Map<string, HTMLImageElement>
 ) {
   const size = avatarSize;
   const ratio = size / 28;
@@ -422,6 +484,40 @@ function drawAiAvatar(
 
   ctx.save();
   if (skin === 'custom') {
+    if (customAvatar) {
+      const img = imageCache?.get(customAvatar);
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, size / 2, 0, Math.PI * 2);
+      ctx.closePath();
+      ctx.fillStyle = customColor || '#6366f1';
+      ctx.fill();
+      ctx.clip();
+      if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+        const imgAspect = img.naturalWidth / img.naturalHeight;
+        let sx = 0;
+        let sy = 0;
+        let sw = img.naturalWidth;
+        let sh = img.naturalHeight;
+        if (imgAspect > 1) {
+          sw = img.naturalHeight;
+          sx = (img.naturalWidth - sw) / 2;
+        } else if (imgAspect < 1) {
+          sh = img.naturalWidth;
+          sy = (img.naturalHeight - sh) / 2;
+        }
+        ctx.drawImage(img, sx, sy, sw, sh, x, y, size, size);
+      }
+      ctx.restore();
+      ctx.beginPath();
+      ctx.arc(cx, cy, size / 2, 0, Math.PI * 2);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = customColor || palette.avatarBorder;
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
     ctx.beginPath();
     ctx.arc(cx, cy, size / 2, 0, Math.PI * 2);
     ctx.fillStyle = customColor || '#6366f1';
@@ -459,6 +555,53 @@ function drawAiAvatar(
         ctx.arc(12, 12, 10, 0, Math.PI * 2);
         ctx.stroke();
         ctx.stroke(new Path2D('M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20M2 12h20'));
+        break;
+      case 'user':
+        ctx.beginPath();
+        ctx.arc(12, 8, 4, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.stroke(new Path2D('M4 20a8 8 0 0 1 16 0'));
+        break;
+      case 'heart':
+        ctx.stroke(
+          new Path2D(
+            'M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z'
+          )
+        );
+        break;
+      case 'flame':
+        ctx.stroke(
+          new Path2D(
+            'M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5Z'
+          )
+        );
+        break;
+      case 'crown':
+        ctx.stroke(new Path2D('M2 18h20L20 7l-5 4-3-6-3 6-5-4-2 11Z'));
+        break;
+      case 'brain':
+        ctx.stroke(
+          new Path2D(
+            'M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z'
+          )
+        );
+        ctx.stroke(
+          new Path2D(
+            'M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z'
+          )
+        );
+        break;
+      case 'ghost':
+        ctx.stroke(
+          new Path2D(
+            'M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8Z'
+          )
+        );
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(9.5, 10, 1.1, 0, Math.PI * 2);
+        ctx.arc(14.5, 10, 1.1, 0, Math.PI * 2);
+        ctx.fill();
         break;
       case 'sparkles':
       default:
@@ -1802,7 +1945,16 @@ export function computeLogicalDimensions(
   let messagesH = 0;
   finalMessages.forEach((msg, idx) => {
     if (idx > 0) messagesH += msgGap;
-    if (msg.role === 'user') {
+    if (msg.role === 'system') {
+      const bodyW = contentContainerW - padX * 2;
+      const lines = wrapPlainText(
+        ctx,
+        msg.content || ' ',
+        Math.max(80, bodyW * 0.85 - 28),
+        `500 12px ${INTER_FONT}`
+      );
+      messagesH += lines.length * 16 + 10;
+    } else if (msg.role === 'user') {
       const attSize = measureAttachmentBlock(msg.attachment, imageCache);
       const attH = attSize.height > 0 ? attSize.height + 8 : 0;
       const bodyW = contentContainerW - padX * 2;
@@ -2036,11 +2188,14 @@ export function renderChatFrameToCanvas(
 
   let cursorContentY = padTop;
   interface LayoutItem {
-    kind: 'user' | 'assistant' | 'thinking';
+    kind: 'user' | 'assistant' | 'system' | 'thinking';
     y: number;
     height: number;
     msg?: RenderedFrameMessage;
     userLines?: string[];
+    systemLines?: string[];
+    pillW?: number;
+    pillH?: number;
     bubbleW?: number;
     bubbleH?: number;
     attSize?: { width: number; height: number };
@@ -2052,7 +2207,37 @@ export function renderChatFrameToCanvas(
   frame.messages.forEach((msg, idx) => {
     if (idx > 0) cursorContentY += msgGap;
 
-    if (msg.role === 'user') {
+    if (msg.role === 'system') {
+      const sysFontSize = isClean16x9 ? Math.round(activeCleanFont * 0.62) : 12;
+      const sysLineH = Math.round(sysFontSize * 1.35);
+      const padPillX = isClean16x9 ? 20 : 14;
+      const padPillY = isClean16x9 ? 8 : 5;
+      const maxPillW = bodyW * (isClean16x9 ? 0.88 : 0.85);
+      const font = `500 ${sysFontSize}px ${INTER_FONT}`;
+      const lines = wrapPlainText(
+        ctx,
+        msg.content || ' ',
+        Math.max(80, maxPillW - padPillX * 2),
+        font
+      );
+      ctx.font = font;
+      let maxLineW = 0;
+      for (const l of lines) {
+        maxLineW = Math.max(maxLineW, ctx.measureText(l).width);
+      }
+      const pillW = Math.min(maxPillW, Math.max(64, maxLineW + padPillX * 2));
+      const pillH = lines.length * sysLineH + padPillY * 2;
+      layoutItems.push({
+        kind: 'system',
+        y: cursorContentY,
+        height: pillH,
+        msg,
+        systemLines: lines,
+        pillW,
+        pillH,
+      });
+      cursorContentY += pillH;
+    } else if (msg.role === 'user') {
       const attSize = measureAttachmentBlock(msg.attachment, imageCache);
       const attH = attSize.height > 0 ? attSize.height + 8 : 0;
       const font = `400 ${msgFontSize}px ${INTER_FONT}`;
@@ -2180,6 +2365,49 @@ export function renderChatFrameToCanvas(
     }
 
     if (
+      item.kind === 'system' &&
+      item.msg &&
+      item.systemLines &&
+      item.pillW &&
+      item.pillH
+    ) {
+      const sysColors = getSystemPillColors(config.theme, isClean16x9);
+      const sysFontSize = isClean16x9 ? Math.round(activeCleanFont * 0.62) : 12;
+      const sysLineH = Math.round(sysFontSize * 1.35);
+      const padPillY = isClean16x9 ? 8 : 5;
+      const t = item.msg.systemAnimate === false ? 1 : item.msg.enterProgress;
+      const eased = 1 - Math.pow(1 - t, 3);
+      const scaleFactor = 0.94 + 0.06 * eased;
+      const offsetY = (1 - eased) * 6;
+      const centerX = bodyX + bodyW / 2;
+      const centerY = drawY + item.pillH / 2 + offsetY;
+
+      ctx.save();
+      ctx.globalAlpha = eased;
+      ctx.translate(centerX, centerY);
+      ctx.scale(scaleFactor, scaleFactor);
+      ctx.translate(-item.pillW / 2, -item.pillH / 2);
+
+      ctx.fillStyle = sysColors.bg;
+      roundedRectPath(ctx, 0, 0, item.pillW, item.pillH, 999);
+      ctx.fill();
+      ctx.strokeStyle = sysColors.border;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.fillStyle = sysColors.text;
+      ctx.font = `500 ${sysFontSize}px ${INTER_FONT}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      item.systemLines.forEach((line, li) => {
+        ctx.fillText(
+          line,
+          item.pillW! / 2,
+          padPillY + li * sysLineH + sysLineH / 2
+        );
+      });
+      ctx.restore();
+    } else if (
       item.kind === 'user' &&
       item.msg &&
       item.userLines &&
@@ -2302,7 +2530,9 @@ export function renderChatFrameToCanvas(
         palette,
         item.msg.customSenderColor,
         item.msg.customSenderIcon,
-        avatarSize
+        avatarSize,
+        item.msg.customSenderAvatar,
+        imageCache
       );
 
       let contentDrawY = drawY;
@@ -2409,16 +2639,26 @@ export function renderChatFrameToCanvas(
       }
     } else if (item.kind === 'thinking') {
       const thinkingSkin: MessageSenderSkin =
-        config.skin === 'multi' ? 'chatgpt' : config.skin;
+        config.skin === 'multi'
+          ? (frame.thinkingSender?.senderSkin ?? 'chatgpt')
+          : config.skin;
       drawAiAvatar(
         ctx,
         thinkingSkin,
         bodyX,
         drawY,
         palette,
-        undefined,
-        undefined,
-        avatarSize
+        config.skin === 'multi'
+          ? frame.thinkingSender?.customSenderColor
+          : undefined,
+        config.skin === 'multi'
+          ? frame.thinkingSender?.customSenderIcon
+          : undefined,
+        avatarSize,
+        config.skin === 'multi'
+          ? frame.thinkingSender?.customSenderAvatar
+          : undefined,
+        imageCache
       );
       const pulse =
         0.28 +
@@ -2768,5 +3008,119 @@ export function renderChatFrameToCanvas(
     drawInFrameSidebar(ctx, sidebarW, logicalHeight, palette, config.skin);
   }
 
+  // Draw 16:9 Clean Focus Stage Overlays (Full-Time & Timed Popups)
+  if (isClean16x9 && config.overlays && config.overlays.length > 0) {
+    drawStageOverlays(
+      ctx,
+      logicalWidth,
+      logicalHeight,
+      config.overlays,
+      frame.timeMs / 1000,
+      imageCache
+    );
+  }
+
   ctx.restore();
 }
+
+function drawStageOverlays(
+  ctx: CanvasRenderingContext2D,
+  logicalWidth: number,
+  logicalHeight: number,
+  overlays: StageOverlay[],
+  elapsedSec: number,
+  imageCache: Map<string, HTMLImageElement>
+) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, logicalWidth, logicalHeight);
+  ctx.clip();
+
+  for (const overlay of overlays) {
+    const vis = evaluateOverlayVisibility(overlay, elapsedSec, true);
+    if (!vis.visible || vis.opacity <= 0.005) continue;
+
+    const w = Math.max(20, overlay.width);
+    const h = Math.max(20, overlay.height);
+    const cx = overlay.x + w / 2;
+    const cy = overlay.y + h / 2 + vis.offsetY;
+
+    ctx.save();
+    ctx.globalAlpha = vis.opacity;
+    ctx.translate(cx, cy);
+    ctx.scale(vis.scale, vis.scale);
+    ctx.translate(-w / 2, -h / 2);
+
+    if (overlay.kind === 'image' && overlay.imageDataUrl) {
+      const img = imageCache.get(overlay.imageDataUrl);
+      const radius = Math.max(0, overlay.imageBorderRadius ?? 14);
+
+      ctx.save();
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.28)';
+      ctx.shadowBlur = 22;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 8;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.01)';
+      roundedRectPath(ctx, 0, 0, w, h, radius);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      roundedRectPath(ctx, 0, 0, w, h, radius);
+      ctx.clip();
+      if (img && img.naturalWidth > 0) {
+        ctx.drawImage(img, 0, 0, w, h);
+      }
+      ctx.restore();
+    } else if (overlay.kind === 'text') {
+      const usePill = overlay.pillBg !== false;
+      const padX = usePill ? 16 : 6;
+      const padY = usePill ? 10 : 4;
+
+      if (usePill) {
+        const pillRadius = Math.min(18, h / 2);
+        ctx.save();
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.24)';
+        ctx.shadowBlur = 20;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 6;
+        ctx.fillStyle = hexToRgba(
+          overlay.pillBgColor || '#0f172a',
+          overlay.pillBgOpacity ?? 0.92
+        );
+        roundedRectPath(ctx, 0, 0, w, h, pillRadius);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      const fontSize = Math.max(10, overlay.fontSize ?? 26);
+      const weight = overlay.bold ? '700' : '500';
+      const style = overlay.italic ? 'italic ' : '';
+      const fontFamily = getOverlayFontStack(overlay.fontFamily ?? 'display');
+      const font = `${style}${weight} ${fontSize}px ${fontFamily}`;
+      const lineH = Math.round(fontSize * 1.28);
+      const maxTextW = Math.max(24, w - padX * 2);
+      const lines = wrapPlainText(ctx, overlay.text ?? '', maxTextW, font);
+
+      ctx.save();
+      roundedRectPath(ctx, 0, 0, w, h, usePill ? Math.min(18, h / 2) : 0);
+      ctx.clip();
+      ctx.font = font;
+      ctx.fillStyle = overlay.color || '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      const totalTextH = lines.length * lineH;
+      const startY = Math.max(padY, (h - totalTextH) / 2);
+      lines.forEach((line, idx) => {
+        ctx.fillText(line, w / 2, startY + idx * lineH + lineH / 2);
+      });
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
