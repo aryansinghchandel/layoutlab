@@ -5,10 +5,13 @@ import {
   Copy,
   Image as ImageIcon,
   Italic,
+  Play,
   Sparkles,
   Trash2,
   Type,
   Upload,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import {
@@ -16,13 +19,17 @@ import {
   OVERLAY_TEXT_COLORS,
   type OverlayFontFamily,
   type OverlayTransition,
+  type SoundBankFile,
   type StageOverlay,
 } from '../types';
+import { fuzzyMatchSoundFile, resolveSfxFile } from '../utils/soundEngine';
 
 interface StageOverlayInspectorProps {
   overlay: StageOverlay;
   totalDurationSec: number;
   textInputRef?: React.RefObject<HTMLTextAreaElement | null>;
+  soundBank?: SoundBankFile[];
+  onAuditionSoundFile?: (fileId: string, volume?: number) => void;
   onUpdate: (id: string, patch: Partial<StageOverlay>) => void;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
@@ -33,6 +40,8 @@ export function StageOverlayInspector({
   overlay,
   totalDurationSec,
   textInputRef,
+  soundBank = [],
+  onAuditionSoundFile,
   onUpdate,
   onDuplicate,
   onDelete,
@@ -59,6 +68,7 @@ export function StageOverlayInspector({
           imageDataUrl: dataUrl,
           imageName: file.name,
           imageAspectRatio: aspect,
+          isGifPlaceholder: false,
           height: Math.min(460, nextH),
         });
       };
@@ -68,7 +78,14 @@ export function StageOverlayInspector({
   };
 
   const isText = overlay.kind === 'text';
+  const isGifSlot = !isText && !overlay.imageDataUrl;
   const usePill = overlay.pillBg !== false;
+  const resolvedOverlaySfx = resolveSfxFile(
+    overlay.sfxCue,
+    overlay.sfxFileId,
+    soundBank
+  );
+  const autoMatchedSfx = fuzzyMatchSoundFile(overlay.sfxCue, soundBank);
 
   return (
     <div
@@ -86,7 +103,11 @@ export function StageOverlayInspector({
             )}
           </span>
           <span className="text-xs font-bold text-slate-900">
-            {isText ? 'Text Box Overlay' : 'Image Overlay'}
+            {isText
+              ? 'Text Box Overlay'
+              : isGifSlot
+                ? 'GIF Overlay Placeholder'
+                : 'GIF / Image Overlay'}
           </span>
           <span className="rounded-md bg-slate-100 px-2 py-0.5 font-mono text-[10.5px] font-medium text-slate-500 tabular-nums">
             {Math.round(overlay.width)}×{Math.round(overlay.height)} px
@@ -334,21 +355,27 @@ export function StageOverlayInspector({
                 <input
                   ref={replaceImgRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/gif,image/*"
                   onChange={handleReplaceImage}
                   className="hidden"
                 />
                 <button
                   type="button"
                   onClick={() => replaceImgRef.current?.click()}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-800 transition-colors hover:bg-slate-100 cursor-pointer"
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+                    isGifSlot
+                      ? 'border-slate-900 bg-slate-900 text-white hover:bg-slate-800'
+                      : 'border-slate-200 bg-slate-50 text-slate-800 hover:bg-slate-100'
+                  }`}
                 >
                   <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                  Replace Image
+                  {isGifSlot ? 'Upload GIF / Image' : 'Replace GIF / Image'}
                 </button>
-                {overlay.imageName && (
-                  <span className="max-w-[220px] truncate text-xs text-slate-500">
-                    {overlay.imageName}
+                {(overlay.placeholderLabel || overlay.imageName) && (
+                  <span className="max-w-[240px] truncate text-xs text-slate-500">
+                    {isGifSlot
+                      ? `Cue: ${overlay.placeholderLabel || overlay.imageName}`
+                      : overlay.imageName}
                   </span>
                 )}
               </div>
@@ -480,6 +507,81 @@ export function StageOverlayInspector({
                     )
                   )}
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Overlay SFX Cue & Override */}
+          {(overlay.sfxCue || soundBank.length > 0) && (
+            <div className="mt-2 space-y-1.5 border-t border-slate-200/80 pt-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-slate-700">
+                  <Volume2 className="h-3 w-3 text-slate-500" />
+                  Overlay SFX
+                </span>
+                {overlay.sfxCue && (
+                  <span className="max-w-[160px] truncate rounded bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-600 border border-slate-200">
+                    {overlay.sfxCue}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <select
+                  aria-label="Overlay sound effect"
+                  value={overlay.sfxFileId ?? 'auto'}
+                  onChange={(e) =>
+                    onUpdate(overlay.id, { sfxFileId: e.target.value })
+                  }
+                  className="h-7 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-800 outline-none focus:border-slate-400"
+                >
+                  <option value="auto">
+                    {autoMatchedSfx
+                      ? `Auto (${autoMatchedSfx.baseName})`
+                      : 'Auto (None matched)'}
+                  </option>
+                  <option value="none">No Sound</option>
+                  {soundBank.map((file) => (
+                    <option key={file.id} value={file.id}>
+                      {file.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={!resolvedOverlaySfx || Boolean(overlay.sfxMuted)}
+                  onClick={() => {
+                    if (resolvedOverlaySfx) {
+                      onAuditionSoundFile?.(
+                        resolvedOverlaySfx.id,
+                        overlay.sfxVolume ?? 0.9
+                      );
+                    }
+                  }}
+                  title="Preview SFX"
+                  aria-label="Preview overlay SFX"
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+                >
+                  <Play className="h-3 w-3 fill-current" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdate(overlay.id, { sfxMuted: !overlay.sfxMuted })
+                  }
+                  title={overlay.sfxMuted ? 'Unmute overlay SFX' : 'Mute overlay SFX'}
+                  aria-label={overlay.sfxMuted ? 'Unmute overlay SFX' : 'Mute overlay SFX'}
+                  className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition-colors cursor-pointer ${
+                    overlay.sfxMuted
+                      ? 'border-red-200 bg-red-50 text-red-600'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                  }`}
+                >
+                  {overlay.sfxMuted ? (
+                    <VolumeX className="h-3.5 w-3.5" />
+                  ) : (
+                    <Volume2 className="h-3.5 w-3.5" />
+                  )}
+                </button>
               </div>
             </div>
           )}

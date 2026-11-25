@@ -8,18 +8,29 @@ import {
 } from 'webm-muxer';
 import type {
   AnimationFormat,
+  BackgroundLoopConfig,
   ChatMessage,
   PlaybackSpeed,
+  SoundBankFile,
+  VideoAudioMode,
   VideoQuality,
 } from '../types';
 import {
   buildAnimationTimeline,
   computeLogicalDimensions,
+  type DecodedGifTrack,
+  disposeAnimatedGifs,
+  preloadAnimatedGifs,
   preloadAttachmentImages,
   type RenderConfig,
   renderChatFrameToCanvas,
   type ScrollState,
 } from './nativeCanvasRenderer';
+import {
+  buildMasterAudioSchedule,
+  encodeAudioBufferToWavBlob,
+  renderMasterAudioMixToBuffer,
+} from './soundEngine';
 
 const GIF_JS_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js';
 const GIF_WORKER_CDN =
@@ -55,25 +66,34 @@ export interface AnimationExportController {
 const EXPORT_FPS = 60;
 const FRAME_STEP_MS = 1000 / EXPORT_FPS;
 const FRAME_DURATION_US = Math.round(1_000_000 / EXPORT_FPS);
+const EXPORT_AUDIO_SAMPLE_RATE = 48000;
+const EXPORT_AUDIO_CHANNELS = 2;
+const EXPORT_AUDIO_CHUNK_FRAMES = 960; // 20ms at 48kHz
 
 function yieldToMainThread(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
-function pickVideoMimeType(requested: 'mp4' | 'webm'): {
-  mimeType: string;
-  extension: 'mp4' | 'webm';
-} {
+function pickVideoMimeType(
+  requested: 'mp4' | 'webm',
+  withAudio = false
+): { mimeType: string; extension: 'mp4' | 'webm' } {
   if (typeof MediaRecorder === 'undefined') {
     throw new Error('MediaRecorder is not supported in this browser.');
   }
 
   if (requested === 'mp4') {
-    const mp4Candidates = [
-      'video/mp4;codecs=avc1.42E01E',
-      'video/mp4;codecs=avc1',
-      'video/mp4',
-    ];
+    const mp4Candidates = withAudio
+      ? [
+          'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+          'video/mp4;codecs=avc1,mp4a.40.2',
+          'video/mp4',
+        ]
+      : [
+          'video/mp4;codecs=avc1.42E01E',
+          'video/mp4;codecs=avc1',
+          'video/mp4',
+        ];
     for (const type of mp4Candidates) {
       if (MediaRecorder.isTypeSupported(type)) {
         return { mimeType: type, extension: 'mp4' };
@@ -81,11 +101,13 @@ function pickVideoMimeType(requested: 'mp4' | 'webm'): {
     }
   }
 
-  const webmCandidates = [
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-  ];
+  const webmCandidates = withAudio
+    ? [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm',
+      ]
+    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
   for (const type of webmCandidates) {
     if (MediaRecorder.isTypeSupported(type)) {
       return { mimeType: type, extension: 'webm' };
@@ -100,6 +122,93 @@ interface SupportedWebCodecsSetup {
   mp4Codec?: 'avc' | 'vp9';
   webmCodec?: 'V_VP9' | 'V_VP8';
   encoderConfig: VideoEncoderConfig;
+}
+
+interface SupportedAudioWebCodecsSetup {
+  mp4AudioCodec?: 'aac' | 'opus';
+  webmAudioCodec?: 'A_OPUS';
+  encoderConfig: AudioEncoderConfig;
+}
+
+async function probeWebCodecsAudioSetup(
+  container: 'mp4' | 'webm'
+): Promise<SupportedAudioWebCodecsSetup | null> {
+  if (
+    typeof AudioEncoder === 'undefined' ||
+    typeof AudioData === 'undefined'
+  ) {
+    return null;
+  }
+
+  if (container === 'mp4') {
+    const mp4AudioCandidates: Array<{
+      codec: string;
+      muxCodec: 'aac' | 'opus';
+    }> = [
+      { codec: 'mp4a.40.2', muxCodec: 'aac' },
+      { codec: 'opus', muxCodec: 'opus' },
+    ];
+    for (const item of mp4AudioCandidates) {
+      const cfg: AudioEncoderConfig = {
+        codec: item.codec,
+        numberOfChannels: EXPORT_AUDIO_CHANNELS,
+        sampleRate: EXPORT_AUDIO_SAMPLE_RATE,
+        bitrate: 192_000,
+      };
+      try {
+        const support = await AudioEncoder.isConfigSupported(cfg);
+        if (support.supported) {
+          return { mp4AudioCodec: item.muxCodec, encoderConfig: cfg };
+        }
+      } catch {
+        // Try next candidate
+      }
+    }
+    return null;
+  }
+
+  const webmCfg: AudioEncoderConfig = {
+    codec: 'opus',
+    numberOfChannels: EXPORT_AUDIO_CHANNELS,
+    sampleRate: EXPORT_AUDIO_SAMPLE_RATE,
+    bitrate: 192_000,
+  };
+  try {
+    const support = await AudioEncoder.isConfigSupported(webmCfg);
+    if (support.supported) {
+      return { webmAudioCodec: 'A_OPUS', encoderConfig: webmCfg };
+    }
+  } catch {
+    // Unsupported
+  }
+  return null;
+}
+
+function encodeAudioSliceToEncoder(
+  audioEncoder: AudioEncoder,
+  ch0: Float32Array,
+  ch1: Float32Array,
+  sampleRate: number,
+  offsetFrames: number,
+  numFrames: number
+) {
+  const planar = new Float32Array(numFrames * 2);
+  planar.set(ch0.subarray(offsetFrames, offsetFrames + numFrames), 0);
+  planar.set(ch1.subarray(offsetFrames, offsetFrames + numFrames), numFrames);
+  const timestampUs = Math.round((offsetFrames / sampleRate) * 1_000_000);
+  const audioData = new AudioData({
+    format: 'f32-planar',
+    sampleRate,
+    numberOfFrames: numFrames,
+    numberOfChannels: 2,
+    timestamp: timestampUs,
+    data: planar,
+  });
+  try {
+    audioEncoder.encode(audioData);
+  } finally {
+    audioData.close();
+  }
 }
 
 async function probeWebCodecsSetup(
@@ -278,21 +387,105 @@ function triggerBlobDownload(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
+export async function exportAudioStemWav(params: {
+  messages: ChatMessage[];
+  config: RenderConfig;
+  speed: PlaybackSpeed;
+  soundBank: SoundBankFile[];
+  backgroundLoop: BackgroundLoopConfig;
+  masterMuted?: boolean;
+}): Promise<{ eventCount: number; hasBackground: boolean; durationSec: number }> {
+  const {
+    messages,
+    config,
+    speed,
+    soundBank,
+    backgroundLoop,
+    masterMuted = false,
+  } = params;
+
+  if (messages.length === 0) {
+    throw new Error('Add at least one message before exporting a WAV audio stem.');
+  }
+  if (soundBank.length === 0) {
+    throw new Error('Load your Sound Bank first to render the synced WAV audio stem.');
+  }
+
+  const timeline = buildAnimationTimeline(
+    messages,
+    speed,
+    config.showBottomBar,
+    { includeFinalHold: true }
+  );
+
+  const schedule = buildMasterAudioSchedule({
+    timeline,
+    messages,
+    overlays: config.overlays ?? [],
+    previewMode: config.previewMode,
+    soundBank,
+    backgroundLoop,
+    masterMuted,
+  });
+
+  if (schedule.events.length === 0 && !schedule.backgroundFile) {
+    throw new Error(
+      'No matched SFX cues or background loop are active. Assign sounds or unmute to export WAV.'
+    );
+  }
+
+  const renderedBuffer = await renderMasterAudioMixToBuffer(
+    schedule,
+    soundBank,
+    EXPORT_AUDIO_SAMPLE_RATE
+  );
+  if (!renderedBuffer) {
+    throw new Error('Unable to render audio mix.');
+  }
+
+  const wavBlob = encodeAudioBufferToWavBlob(renderedBuffer);
+  triggerBlobDownload(wavBlob, 'layoutlab-audio-stem.wav');
+
+  return {
+    eventCount: schedule.events.length,
+    hasBackground: Boolean(schedule.backgroundFile),
+    durationSec: timeline.totalDurationMs / 1000,
+  };
+}
+
 export function startNativeAnimationExport(params: {
   messages: ChatMessage[];
   config: RenderConfig;
   speed: PlaybackSpeed;
   quality: VideoQuality;
   format: AnimationFormat;
+  audioMode?: VideoAudioMode;
+  soundBank?: SoundBankFile[];
+  backgroundLoop?: BackgroundLoopConfig;
+  masterAudioMuted?: boolean;
   onProgress: (info: ExportProgressInfo) => void;
 }): AnimationExportController {
-  const { messages, config, speed, quality, format, onProgress } = params;
+  const {
+    messages,
+    config,
+    speed,
+    quality,
+    format,
+    audioMode = 'baked',
+    soundBank = [],
+    backgroundLoop,
+    masterAudioMuted = false,
+    onProgress,
+  } = params;
   let cancelled = false;
   let activeRecorder: MediaRecorder | null = null;
   let activeStream: MediaStream | null = null;
   let activeEncoder: VideoEncoder | null = null;
+  let activeAudioEncoder: AudioEncoder | null = null;
+  let activeFallbackAudioCtx: AudioContext | null = null;
   let activeGif: GifJsInstance | null = null;
   let activeWorkerUrl: string | null = null;
+  let activeGifCache: Map<string, DecodedGifTrack> | null = null;
 
   const cleanup = () => {
     if (activeEncoder) {
@@ -305,6 +498,26 @@ export function startNativeAnimationExport(params: {
       }
       activeEncoder = null;
     }
+    if (activeAudioEncoder) {
+      try {
+        if (activeAudioEncoder.state !== 'closed') {
+          activeAudioEncoder.close();
+        }
+      } catch {
+        // Ignore
+      }
+      activeAudioEncoder = null;
+    }
+    if (activeFallbackAudioCtx) {
+      try {
+        if (activeFallbackAudioCtx.state !== 'closed') {
+          void activeFallbackAudioCtx.close();
+        }
+      } catch {
+        // Ignore
+      }
+      activeFallbackAudioCtx = null;
+    }
     if (activeStream) {
       activeStream.getTracks().forEach((t) => t.stop());
       activeStream = null;
@@ -312,6 +525,10 @@ export function startNativeAnimationExport(params: {
     if (activeWorkerUrl) {
       URL.revokeObjectURL(activeWorkerUrl);
       activeWorkerUrl = null;
+    }
+    if (activeGifCache) {
+      disposeAnimatedGifs(activeGifCache);
+      activeGifCache = null;
     }
   };
 
@@ -342,8 +559,15 @@ export function startNativeAnimationExport(params: {
       throw new Error('Unable to create off-screen 2D canvas.');
     }
 
-    const imageCache = await preloadAttachmentImages(messages, config.overlays);
-    if (cancelled) return;
+    const [imageCache, gifCache] = await Promise.all([
+      preloadAttachmentImages(messages, config.overlays),
+      preloadAnimatedGifs(config.overlays),
+    ]);
+    activeGifCache = gifCache;
+    if (cancelled) {
+      cleanup();
+      return;
+    }
 
     const { width: logicalWidth, height: logicalHeight } =
       computeLogicalDimensions(ctx, config, messages, imageCache);
@@ -354,7 +578,10 @@ export function startNativeAnimationExport(params: {
       canvas.height = Math.round(logicalHeight * gifScale);
 
       const GIFConstructor = await ensureGifJsLoaded();
-      if (cancelled) return;
+      if (cancelled) {
+        cleanup();
+        return;
+      }
       activeWorkerUrl = await createInlineGifWorkerUrl();
       if (cancelled) {
         cleanup();
@@ -399,7 +626,8 @@ export function startNativeAnimationExport(params: {
           config,
           frame,
           scrollState,
-          imageCache
+          imageCache,
+          gifCache
         );
         gif.addFrame(canvas, { copy: true, delay: frameDelayMs });
         currentTimeMs += frameDelayMs;
@@ -470,7 +698,37 @@ export function startNativeAnimationExport(params: {
       Math.ceil(timeline.totalDurationMs / FRAME_STEP_MS) + 1
     );
 
-    // Primary Path: Frame-Locked Deterministic WebCodecs (VideoEncoder + MP4/WebM Muxer)
+    // Offline render synced audio mix (Background Loop + per-line SFX + GIF overlay SFX)
+    let renderedAudioBuffer: AudioBuffer | null = null;
+    if (
+      audioMode === 'baked' &&
+      !masterAudioMuted &&
+      soundBank.length > 0 &&
+      backgroundLoop
+    ) {
+      const schedule = buildMasterAudioSchedule({
+        timeline,
+        messages,
+        overlays: config.overlays ?? [],
+        previewMode: config.previewMode,
+        soundBank,
+        backgroundLoop,
+        masterMuted: masterAudioMuted,
+      });
+      if (schedule.events.length > 0 || schedule.backgroundFile) {
+        renderedAudioBuffer = await renderMasterAudioMixToBuffer(
+          schedule,
+          soundBank,
+          EXPORT_AUDIO_SAMPLE_RATE
+        );
+        if (cancelled) {
+          cleanup();
+          return;
+        }
+      }
+    }
+
+    // Primary Path: Frame-Locked Deterministic WebCodecs (VideoEncoder + Optional AudioEncoder + MP4/WebM Muxer)
     const webCodecsSetup = await probeWebCodecsSetup(
       format,
       pixelWidth,
@@ -483,6 +741,26 @@ export function startNativeAnimationExport(params: {
     }
 
     if (webCodecsSetup) {
+      const audioWebCodecsSetup = renderedAudioBuffer
+        ? await probeWebCodecsAudioSetup(webCodecsSetup.container)
+        : null;
+      if (cancelled) {
+        cleanup();
+        return;
+      }
+
+      const audioCh0 =
+        renderedAudioBuffer && audioWebCodecsSetup
+          ? renderedAudioBuffer.getChannelData(0)
+          : null;
+      const audioCh1 =
+        renderedAudioBuffer && audioWebCodecsSetup
+          ? renderedAudioBuffer.numberOfChannels > 1
+            ? renderedAudioBuffer.getChannelData(1)
+            : renderedAudioBuffer.getChannelData(0)
+          : null;
+      const audioTotalFrames = renderedAudioBuffer?.length ?? 0;
+
       let encoderFailure: Error | null = null;
 
       if (webCodecsSetup.container === 'mp4') {
@@ -495,6 +773,15 @@ export function startNativeAnimationExport(params: {
             height: pixelHeight,
             frameRate: EXPORT_FPS,
           },
+          ...(audioWebCodecsSetup && audioWebCodecsSetup.mp4AudioCodec
+            ? {
+                audio: {
+                  codec: audioWebCodecsSetup.mp4AudioCodec,
+                  numberOfChannels: EXPORT_AUDIO_CHANNELS,
+                  sampleRate: EXPORT_AUDIO_SAMPLE_RATE,
+                },
+              }
+            : {}),
           fastStart: 'in-memory',
           firstTimestampBehavior: 'strict',
         });
@@ -511,9 +798,25 @@ export function startNativeAnimationExport(params: {
         activeEncoder = encoder;
         encoder.configure(webCodecsSetup.encoderConfig);
 
+        let audioEncoder: AudioEncoder | null = null;
+        if (audioWebCodecsSetup && audioCh0 && audioCh1) {
+          audioEncoder = new AudioEncoder({
+            output: (chunk, meta) => {
+              muxer.addAudioChunk(chunk, meta);
+            },
+            error: (err) => {
+              encoderFailure =
+                err instanceof Error ? err : new Error(String(err));
+            },
+          });
+          activeAudioEncoder = audioEncoder;
+          audioEncoder.configure(audioWebCodecsSetup.encoderConfig);
+        }
+
         onProgress({ percent: 0, currentFrame: 0, totalFrames });
 
         let currentTimeMs = 0;
+        let audioOffsetFrames = 0;
         for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
           if (cancelled) {
             cleanup();
@@ -537,7 +840,8 @@ export function startNativeAnimationExport(params: {
             config,
             frameState,
             scrollState,
-            imageCache
+            imageCache,
+            gifCache
           );
 
           while (!cancelled && !encoderFailure && encoder.encodeQueueSize > 8) {
@@ -566,7 +870,37 @@ export function startNativeAnimationExport(params: {
             videoFrame.close();
           }
 
-          // Advance deterministic animation clock strictly AFTER frame is captured & encoded
+          if (audioEncoder && audioCh0 && audioCh1) {
+            while (
+              audioOffsetFrames < audioTotalFrames &&
+              Math.round(
+                (audioOffsetFrames / EXPORT_AUDIO_SAMPLE_RATE) * 1_000_000
+              ) <= timestampUs
+            ) {
+              while (
+                !cancelled &&
+                !encoderFailure &&
+                audioEncoder.encodeQueueSize > 16
+              ) {
+                await yieldToMainThread();
+              }
+              if (cancelled || encoderFailure) break;
+              const numFrames = Math.min(
+                EXPORT_AUDIO_CHUNK_FRAMES,
+                audioTotalFrames - audioOffsetFrames
+              );
+              encodeAudioSliceToEncoder(
+                audioEncoder,
+                audioCh0,
+                audioCh1,
+                EXPORT_AUDIO_SAMPLE_RATE,
+                audioOffsetFrames,
+                numFrames
+              );
+              audioOffsetFrames += numFrames;
+            }
+          }
+
           currentTimeMs += FRAME_STEP_MS;
 
           const currentFrame = frameIndex + 1;
@@ -579,8 +913,37 @@ export function startNativeAnimationExport(params: {
             totalFrames,
           });
 
-          // Yield briefly to keep scrolling, Cancel, and progress bar smooth
           await yieldToMainThread();
+        }
+
+        if (audioEncoder && audioCh0 && audioCh1) {
+          while (
+            !cancelled &&
+            !encoderFailure &&
+            audioOffsetFrames < audioTotalFrames
+          ) {
+            while (
+              !cancelled &&
+              !encoderFailure &&
+              audioEncoder.encodeQueueSize > 16
+            ) {
+              await yieldToMainThread();
+            }
+            if (cancelled || encoderFailure) break;
+            const numFrames = Math.min(
+              EXPORT_AUDIO_CHUNK_FRAMES,
+              audioTotalFrames - audioOffsetFrames
+            );
+            encodeAudioSliceToEncoder(
+              audioEncoder,
+              audioCh0,
+              audioCh1,
+              EXPORT_AUDIO_SAMPLE_RATE,
+              audioOffsetFrames,
+              numFrames
+            );
+            audioOffsetFrames += numFrames;
+          }
         }
 
         if (cancelled) {
@@ -592,6 +955,9 @@ export function startNativeAnimationExport(params: {
         }
 
         await encoder.flush();
+        if (audioEncoder) {
+          await audioEncoder.flush();
+        }
         if (cancelled) {
           cleanup();
           return;
@@ -614,6 +980,15 @@ export function startNativeAnimationExport(params: {
           height: pixelHeight,
           frameRate: EXPORT_FPS,
         },
+        ...(audioWebCodecsSetup && audioWebCodecsSetup.webmAudioCodec
+          ? {
+              audio: {
+                codec: audioWebCodecsSetup.webmAudioCodec,
+                numberOfChannels: EXPORT_AUDIO_CHANNELS,
+                sampleRate: EXPORT_AUDIO_SAMPLE_RATE,
+              },
+            }
+          : {}),
         firstTimestampBehavior: 'strict',
       });
 
@@ -628,9 +1003,25 @@ export function startNativeAnimationExport(params: {
       activeEncoder = encoder;
       encoder.configure(webCodecsSetup.encoderConfig);
 
+      let audioEncoder: AudioEncoder | null = null;
+      if (audioWebCodecsSetup && audioCh0 && audioCh1) {
+        audioEncoder = new AudioEncoder({
+          output: (chunk, meta) => {
+            muxer.addAudioChunk(chunk, meta);
+          },
+          error: (err) => {
+            encoderFailure =
+              err instanceof Error ? err : new Error(String(err));
+          },
+        });
+        activeAudioEncoder = audioEncoder;
+        audioEncoder.configure(audioWebCodecsSetup.encoderConfig);
+      }
+
       onProgress({ percent: 0, currentFrame: 0, totalFrames });
 
       let currentTimeMs = 0;
+      let audioOffsetFrames = 0;
       for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
         if (cancelled) {
           cleanup();
@@ -654,7 +1045,8 @@ export function startNativeAnimationExport(params: {
           config,
           frameState,
           scrollState,
-          imageCache
+          imageCache,
+          gifCache
         );
 
         while (!cancelled && !encoderFailure && encoder.encodeQueueSize > 8) {
@@ -681,6 +1073,37 @@ export function startNativeAnimationExport(params: {
           videoFrame.close();
         }
 
+        if (audioEncoder && audioCh0 && audioCh1) {
+          while (
+            audioOffsetFrames < audioTotalFrames &&
+            Math.round(
+              (audioOffsetFrames / EXPORT_AUDIO_SAMPLE_RATE) * 1_000_000
+            ) <= timestampUs
+          ) {
+            while (
+              !cancelled &&
+              !encoderFailure &&
+              audioEncoder.encodeQueueSize > 16
+            ) {
+              await yieldToMainThread();
+            }
+            if (cancelled || encoderFailure) break;
+            const numFrames = Math.min(
+              EXPORT_AUDIO_CHUNK_FRAMES,
+              audioTotalFrames - audioOffsetFrames
+            );
+            encodeAudioSliceToEncoder(
+              audioEncoder,
+              audioCh0,
+              audioCh1,
+              EXPORT_AUDIO_SAMPLE_RATE,
+              audioOffsetFrames,
+              numFrames
+            );
+            audioOffsetFrames += numFrames;
+          }
+        }
+
         currentTimeMs += FRAME_STEP_MS;
 
         const currentFrame = frameIndex + 1;
@@ -696,6 +1119,36 @@ export function startNativeAnimationExport(params: {
         await yieldToMainThread();
       }
 
+      if (audioEncoder && audioCh0 && audioCh1) {
+        while (
+          !cancelled &&
+          !encoderFailure &&
+          audioOffsetFrames < audioTotalFrames
+        ) {
+          while (
+            !cancelled &&
+            !encoderFailure &&
+            audioEncoder.encodeQueueSize > 16
+          ) {
+            await yieldToMainThread();
+          }
+          if (cancelled || encoderFailure) break;
+          const numFrames = Math.min(
+            EXPORT_AUDIO_CHUNK_FRAMES,
+            audioTotalFrames - audioOffsetFrames
+          );
+          encodeAudioSliceToEncoder(
+            audioEncoder,
+            audioCh0,
+            audioCh1,
+            EXPORT_AUDIO_SAMPLE_RATE,
+            audioOffsetFrames,
+            numFrames
+          );
+          audioOffsetFrames += numFrames;
+        }
+      }
+
       if (cancelled) {
         cleanup();
         return;
@@ -705,6 +1158,9 @@ export function startNativeAnimationExport(params: {
       }
 
       await encoder.flush();
+      if (audioEncoder) {
+        await audioEncoder.flush();
+      }
       if (cancelled) {
         cleanup();
         return;
@@ -724,10 +1180,36 @@ export function startNativeAnimationExport(params: {
       );
     }
 
-    const { mimeType, extension } = pickVideoMimeType(format);
-    const stream = canvas.captureStream(0);
+    const withFallbackAudio = Boolean(renderedAudioBuffer);
+    const { mimeType, extension } = pickVideoMimeType(format, withFallbackAudio);
+    const videoStream = canvas.captureStream(0);
+    const combinedTracks: MediaStreamTrack[] = [...videoStream.getVideoTracks()];
+
+    let fallbackAudioSource: AudioBufferSourceNode | null = null;
+    if (renderedAudioBuffer) {
+      try {
+        const AudioCtx =
+          window.AudioContext ||
+          (window as Window & { webkitAudioContext?: typeof AudioContext })
+            .webkitAudioContext;
+        if (AudioCtx) {
+          const audioCtx = new AudioCtx();
+          activeFallbackAudioCtx = audioCtx;
+          const dest = audioCtx.createMediaStreamDestination();
+          const src = audioCtx.createBufferSource();
+          src.buffer = renderedAudioBuffer;
+          src.connect(dest);
+          fallbackAudioSource = src;
+          combinedTracks.push(...dest.stream.getAudioTracks());
+        }
+      } catch {
+        // Proceed video-only
+      }
+    }
+
+    const stream = new MediaStream(combinedTracks);
     activeStream = stream;
-    const videoTrack = stream.getVideoTracks()[0] as
+    const videoTrack = videoStream.getVideoTracks()[0] as
       | (MediaStreamTrack & { requestFrame?: () => void })
       | undefined;
 
@@ -752,7 +1234,8 @@ export function startNativeAnimationExport(params: {
       config,
       timeline.evaluateAt(0),
       scrollState,
-      imageCache
+      imageCache,
+      gifCache
     );
 
     const stopPromise = new Promise<void>((resolve, reject) => {
@@ -785,6 +1268,10 @@ export function startNativeAnimationExport(params: {
       };
     });
 
+    if (fallbackAudioSource) {
+      fallbackAudioSource.start();
+    }
+
     recorder.start(200);
     onProgress({ percent: 0, currentFrame: 0, totalFrames });
 
@@ -806,7 +1293,8 @@ export function startNativeAnimationExport(params: {
         config,
         frame,
         scrollState,
-        imageCache
+        imageCache,
+        gifCache
       );
 
       if (videoTrack && typeof videoTrack.requestFrame === 'function') {

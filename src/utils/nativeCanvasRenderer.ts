@@ -1,5 +1,6 @@
 import { marked, type Token, type Tokens } from 'marked';
 import {
+  type ActiveVisualEffect,
   type AiSkin,
   type ChatMessage,
   type CustomAiIconId,
@@ -65,12 +66,40 @@ export interface AnimationFrameState {
   thinkingSender: ThinkingSenderInfo | null;
   composerDraft: string;
   sendHighlighted: boolean;
+  activeVisualEffect: ActiveVisualEffect | null;
   timeMs: number;
+}
+
+export interface TimelineSegment {
+  startMs: number;
+  endMs: number;
+  kind:
+    | 'idle'
+    | 'user_typing'
+    | 'user_presend'
+    | 'user_send_highlight'
+    | 'user_slide'
+    | 'system_enter'
+    | 'thinking'
+    | 'ai_stream'
+    | 'post_hold'
+    | 'visual_effect'
+    | 'final_hold';
+  msgIndex: number;
+  visualEffect?: 'red_flash' | 'cut_to_black';
+  chars?: string[];
+  words?: string[];
 }
 
 export interface AnimationTimeline {
   totalDurationMs: number;
+  segments: TimelineSegment[];
   evaluateAt: (elapsedMs: number) => AnimationFrameState;
+}
+
+export interface DecodedGifTrack {
+  frames: Array<{ bitmap: ImageBitmap; durationMs: number }>;
+  totalDurationMs: number;
 }
 
 export interface ScrollState {
@@ -135,6 +164,90 @@ export async function preloadAttachmentImages(
   return cache;
 }
 
+interface ImageDecoderLike {
+  tracks: { ready: Promise<void>; selectedTrack: { frameCount: number } | null };
+  decode: (opts: { frameIndex: number }) => Promise<{
+    image: VideoFrame & { duration?: number | null; close: () => void };
+  }>;
+  close: () => void;
+}
+
+export async function preloadAnimatedGifs(
+  overlays: StageOverlay[] = []
+): Promise<Map<string, DecodedGifTrack>> {
+  const gifCache = new Map<string, DecodedGifTrack>();
+  if (typeof window === 'undefined' || !('ImageDecoder' in window)) {
+    return gifCache;
+  }
+  const ImageDecoderCtor = (
+    window as unknown as {
+      ImageDecoder?: new (init: {
+        data: BufferSource;
+        type: string;
+      }) => ImageDecoderLike;
+    }
+  ).ImageDecoder;
+  if (!ImageDecoderCtor || typeof createImageBitmap !== 'function') {
+    return gifCache;
+  }
+
+  const gifUrls = new Set<string>();
+  for (const ov of overlays) {
+    if (
+      ov.kind === 'image' &&
+      ov.imageDataUrl &&
+      ov.imageDataUrl.startsWith('data:image/gif')
+    ) {
+      gifUrls.add(ov.imageDataUrl);
+    }
+  }
+
+  for (const url of gifUrls) {
+    try {
+      const resp = await fetch(url);
+      const buf = await resp.arrayBuffer();
+      const decoder = new ImageDecoderCtor({ data: buf, type: 'image/gif' });
+      await decoder.tracks.ready;
+      const frameCount = decoder.tracks.selectedTrack?.frameCount ?? 0;
+      if (frameCount > 1) {
+        const capped = Math.min(frameCount, 120);
+        const frames: Array<{ bitmap: ImageBitmap; durationMs: number }> = [];
+        let totalDurationMs = 0;
+        for (let i = 0; i < capped; i++) {
+          const decoded = await decoder.decode({ frameIndex: i });
+          const rawDurUs = decoded.image.duration ?? 80_000;
+          const durationMs = Math.max(20, Math.round(rawDurUs / 1000));
+          const bitmap = await createImageBitmap(decoded.image);
+          decoded.image.close();
+          frames.push({ bitmap, durationMs });
+          totalDurationMs += durationMs;
+        }
+        if (frames.length > 1 && totalDurationMs > 0) {
+          gifCache.set(url, { frames, totalDurationMs });
+        }
+      }
+      decoder.close();
+    } catch {
+      // Fall back to static HTMLImageElement rendering
+    }
+  }
+
+  return gifCache;
+}
+
+export function disposeAnimatedGifs(gifCache: Map<string, DecodedGifTrack>) {
+  for (const track of gifCache.values()) {
+    for (const f of track.frames) {
+      try {
+        f.bitmap.close();
+      } catch {
+        // Ignore
+      }
+    }
+  }
+  gifCache.clear();
+}
+
 function tokenizeWordsPreservingWhitespace(text: string): string[] {
   const matches = text.match(/\s*\S+/g);
   if (!matches) {
@@ -147,22 +260,20 @@ function tokenizeWordsPreservingWhitespace(text: string): string[] {
   return matches;
 }
 
-interface TimelineSegment {
-  startMs: number;
-  endMs: number;
-  kind:
-    | 'idle'
-    | 'user_typing'
-    | 'user_presend'
-    | 'user_send_highlight'
-    | 'user_slide'
-    | 'system_enter'
-    | 'thinking'
-    | 'ai_stream'
-    | 'final_hold';
-  msgIndex: number;
-  chars?: string[];
-  words?: string[];
+function evaluateRedFlashIntensity(elapsedInWindowMs: number, durationMs: number): number {
+  if (elapsedInWindowMs < 0 || elapsedInWindowMs > durationMs) return 0;
+  const t = elapsedInWindowMs / Math.max(1, durationMs);
+  // Snappy double-pulse crimson flash curve
+  if (t < 0.14) {
+    return t / 0.14;
+  }
+  if (t < 0.34) {
+    return 1 - ((t - 0.14) / 0.2) * 0.62;
+  }
+  if (t < 0.48) {
+    return 0.38 + ((t - 0.34) / 0.14) * 0.42;
+  }
+  return Math.max(0, 0.8 * (1 - (t - 0.48) / 0.52));
 }
 
 export function buildAnimationTimeline(
@@ -174,31 +285,89 @@ export function buildAnimationTimeline(
   const effectiveSpeed = getEffectivePlaybackMultiplier(speed);
   const includeFinalHold = options?.includeFinalHold ?? true;
   const segments: TimelineSegment[] = [];
+  const redFlashWindows: Array<{ startMs: number; durationMs: number }> = [];
   let cursorMs = 0;
 
   const pushSegment = (
     durationMs: number,
     seg: Omit<TimelineSegment, 'startMs' | 'endMs'>
-  ) => {
+  ): TimelineSegment => {
     const startMs = cursorMs;
     const endMs = cursorMs + Math.max(1, durationMs);
-    segments.push({ ...seg, startMs, endMs });
+    const created: TimelineSegment = { ...seg, startMs, endMs };
+    segments.push(created);
     cursorMs = endMs;
+    return created;
   };
 
   pushSegment(Math.round(180 / effectiveSpeed), { kind: 'idle', msgIndex: -1 });
 
   messages.forEach((msg, index) => {
+    const prevMsg = index > 0 ? messages[index - 1] : null;
+
+    if (msg.cueKind === 'typing') {
+      const holdMs = Math.max(200, Math.round((msg.holdDurationSec ?? 1.5) * 1000));
+      pushSegment(holdMs, {
+        kind: 'thinking',
+        msgIndex: index,
+      });
+      if (msg.postHoldSec && msg.postHoldSec > 0) {
+        pushSegment(Math.round(msg.postHoldSec * 1000), {
+          kind: 'post_hold',
+          msgIndex: index,
+        });
+      }
+      return;
+    }
+
+    if (msg.cueKind === 'visual_effect') {
+      const eff = msg.visualEffect === 'red_flash' ? 'red_flash' : 'cut_to_black';
+      const defaultSec = eff === 'cut_to_black' ? 1.3 : 0.7;
+      const holdMs = Math.max(200, Math.round((msg.holdDurationSec ?? defaultSec) * 1000));
+      const seg = pushSegment(holdMs, {
+        kind: 'visual_effect',
+        msgIndex: index,
+        visualEffect: eff,
+      });
+      if (eff === 'red_flash') {
+        redFlashWindows.push({ startMs: seg.startMs, durationMs: Math.max(650, holdMs) });
+      }
+      if (msg.postHoldSec && msg.postHoldSec > 0) {
+        pushSegment(Math.round(msg.postHoldSec * 1000), {
+          kind: 'post_hold',
+          msgIndex: index,
+          visualEffect: eff === 'cut_to_black' ? 'cut_to_black' : undefined,
+        });
+      }
+      return;
+    }
+
     if (msg.role === 'system') {
       const animate = msg.systemAnimate !== false;
-      pushSegment(Math.round((animate ? 320 : 60) / effectiveSpeed), {
+      const enterSeg = pushSegment(Math.round((animate ? 320 : 60) / effectiveSpeed), {
         kind: 'system_enter',
         msgIndex: index,
       });
+      if (msg.visualEffect === 'red_flash') {
+        redFlashWindows.push({ startMs: enterSeg.startMs, durationMs: 680 });
+      }
       pushSegment(Math.round((animate ? 380 : 320) / effectiveSpeed), {
         kind: 'idle',
         msgIndex: index,
       });
+      if (msg.visualEffect === 'cut_to_black') {
+        pushSegment(1100, {
+          kind: 'visual_effect',
+          msgIndex: index,
+          visualEffect: 'cut_to_black',
+        });
+      }
+      if (msg.postHoldSec && msg.postHoldSec > 0) {
+        pushSegment(Math.round(msg.postHoldSec * 1000), {
+          kind: 'post_hold',
+          msgIndex: index,
+        });
+      }
     } else if (msg.role === 'user') {
       if (showBottomBar) {
         const chars = Array.from(msg.content);
@@ -218,38 +387,79 @@ export function buildAnimationTimeline(
           msgIndex: index,
         });
       }
-      pushSegment(Math.round(240 / effectiveSpeed), {
+      const slideSeg = pushSegment(Math.round(240 / effectiveSpeed), {
         kind: 'user_slide',
         msgIndex: index,
       });
+      if (msg.visualEffect === 'red_flash') {
+        redFlashWindows.push({ startMs: slideSeg.startMs, durationMs: 680 });
+      }
       pushSegment(Math.round(200 / effectiveSpeed), {
         kind: 'idle',
         msgIndex: index,
       });
+      if (msg.visualEffect === 'cut_to_black') {
+        pushSegment(1100, {
+          kind: 'visual_effect',
+          msgIndex: index,
+          visualEffect: 'cut_to_black',
+        });
+      }
+      if (msg.postHoldSec && msg.postHoldSec > 0) {
+        pushSegment(Math.round(msg.postHoldSec * 1000), {
+          kind: 'post_hold',
+          msgIndex: index,
+        });
+      }
     } else {
-      pushSegment(Math.round(1000 / effectiveSpeed), {
-        kind: 'thinking',
-        msgIndex: index,
-      });
+      // Skip redundant default thinking pause if immediately preceded by an explicit [TYPING...] cue
+      if (prevMsg?.cueKind !== 'typing') {
+        pushSegment(Math.round(1000 / effectiveSpeed), {
+          kind: 'thinking',
+          msgIndex: index,
+        });
+      }
       const words = tokenizeWordsPreservingWhitespace(msg.content);
+      let triggerStartMs = cursorMs;
       if (words.length > 0) {
-        pushSegment(Math.round((words.length * 45) / effectiveSpeed), {
+        const streamSeg = pushSegment(Math.round((words.length * 45) / effectiveSpeed), {
           kind: 'ai_stream',
           msgIndex: index,
           words,
         });
+        triggerStartMs = streamSeg.startMs;
+      }
+      if (msg.visualEffect === 'red_flash') {
+        redFlashWindows.push({ startMs: triggerStartMs, durationMs: 680 });
       }
       pushSegment(Math.round(420 / effectiveSpeed), {
         kind: 'idle',
         msgIndex: index,
       });
+      if (msg.visualEffect === 'cut_to_black') {
+        pushSegment(1100, {
+          kind: 'visual_effect',
+          msgIndex: index,
+          visualEffect: 'cut_to_black',
+        });
+      }
+      if (msg.postHoldSec && msg.postHoldSec > 0) {
+        pushSegment(Math.round(msg.postHoldSec * 1000), {
+          kind: 'post_hold',
+          msgIndex: index,
+        });
+      }
     }
   });
 
+  const lastSeg = segments[segments.length - 1];
+  const endsInBlackout = lastSeg?.visualEffect === 'cut_to_black';
+
   if (includeFinalHold) {
-    pushSegment(1500, {
+    pushSegment(endsInBlackout ? 800 : 1500, {
       kind: 'final_hold',
       msgIndex: messages.length - 1,
+      visualEffect: endsInBlackout ? 'cut_to_black' : undefined,
     });
   }
 
@@ -277,8 +487,26 @@ export function buildAnimationTimeline(
       Math.min(1, (clamped - activeSeg.startMs) / segDuration)
     );
 
+    // Determine active visual effect (cut_to_black takes precedence over red_flash)
+    let activeVisualEffect: ActiveVisualEffect | null = null;
+    if (activeSeg.visualEffect === 'cut_to_black') {
+      activeVisualEffect = { type: 'cut_to_black', intensity: 1 };
+    } else {
+      let maxFlash = 0;
+      for (const win of redFlashWindows) {
+        if (clamped >= win.startMs && clamped <= win.startMs + win.durationMs) {
+          const val = evaluateRedFlashIntensity(clamped - win.startMs, win.durationMs);
+          if (val > maxFlash) maxFlash = val;
+        }
+      }
+      if (maxFlash > 0.01) {
+        activeVisualEffect = { type: 'red_flash', intensity: maxFlash };
+      }
+    }
+
     if (activeSeg.kind === 'final_hold') {
       for (const m of messages) {
+        if (m.cueKind) continue;
         visible.push({
           id: m.id,
           role: m.role,
@@ -301,15 +529,22 @@ export function buildAnimationTimeline(
         thinkingSender: null,
         composerDraft: '',
         sendHighlighted: false,
+        activeVisualEffect,
         timeMs: clamped,
       };
     }
 
-    const completedUpTo =
-      activeSeg.kind === 'idle' ? activeSeg.msgIndex : activeSeg.msgIndex - 1;
+    const isCompletedSegKind =
+      activeSeg.kind === 'idle' ||
+      activeSeg.kind === 'post_hold' ||
+      activeSeg.kind === 'visual_effect';
+    const completedUpTo = isCompletedSegKind
+      ? activeSeg.msgIndex
+      : activeSeg.msgIndex - 1;
 
     for (let i = 0; i <= completedUpTo && i < messages.length; i++) {
       const m = messages[i];
+      if (m.cueKind) continue;
       visible.push({
         id: m.id,
         role: m.role,
@@ -333,7 +568,7 @@ export function buildAnimationTimeline(
         : null;
 
     if (currentMsg) {
-      if (activeSeg.kind === 'system_enter') {
+      if (activeSeg.kind === 'system_enter' && !currentMsg.cueKind) {
         visible.push({
           id: currentMsg.id,
           role: 'system',
@@ -356,7 +591,7 @@ export function buildAnimationTimeline(
       } else if (activeSeg.kind === 'user_send_highlight') {
         composerDraft = currentMsg.content;
         sendHighlighted = true;
-      } else if (activeSeg.kind === 'user_slide') {
+      } else if (activeSeg.kind === 'user_slide' && !currentMsg.cueKind) {
         visible.push({
           id: currentMsg.id,
           role: 'user',
@@ -379,7 +614,7 @@ export function buildAnimationTimeline(
           customSenderIcon: currentMsg.customSenderIcon,
           customSenderAvatar: currentMsg.customSenderAvatar,
         };
-      } else if (activeSeg.kind === 'ai_stream' && activeSeg.words) {
+      } else if (activeSeg.kind === 'ai_stream' && activeSeg.words && !currentMsg.cueKind) {
         const count = Math.max(
           1,
           Math.min(
@@ -409,11 +644,12 @@ export function buildAnimationTimeline(
       thinkingSender,
       composerDraft,
       sendHighlighted,
+      activeVisualEffect,
       timeMs: clamped,
     };
   };
 
-  return { totalDurationMs, evaluateAt };
+  return { totalDurationMs, segments, evaluateAt };
 }
 
 // ============================================================================
@@ -1943,7 +2179,8 @@ export function computeLogicalDimensions(
   const palette = getSkinPalette(config.skin, config.theme);
 
   let messagesH = 0;
-  finalMessages.forEach((msg, idx) => {
+  const visibleMessages = finalMessages.filter((m) => !m.cueKind);
+  visibleMessages.forEach((msg, idx) => {
     if (idx > 0) messagesH += msgGap;
     if (msg.role === 'system') {
       const bodyW = contentContainerW - padX * 2;
@@ -2062,7 +2299,8 @@ export function renderChatFrameToCanvas(
   config: RenderConfig,
   frame: AnimationFrameState,
   scrollState: ScrollState,
-  imageCache: Map<string, HTMLImageElement> = new Map()
+  imageCache: Map<string, HTMLImageElement> = new Map(),
+  gifCache?: Map<string, DecodedGifTrack>
 ): void {
   const isClean16x9 = config.previewMode === 'clean16x9';
   const isMobile = !isClean16x9 && config.device === 'mobile';
@@ -3016,11 +3254,73 @@ export function renderChatFrameToCanvas(
       logicalHeight,
       config.overlays,
       frame.timeMs / 1000,
-      imageCache
+      imageCache,
+      gifCache
+    );
+  }
+
+  // Draw Script Visual Effects (Red Flash / Hard Cut to Black) on top of entire frame
+  if (frame.activeVisualEffect) {
+    drawVisualEffectOverlay(
+      ctx,
+      logicalWidth,
+      logicalHeight,
+      frame.activeVisualEffect
     );
   }
 
   ctx.restore();
+}
+
+function drawVisualEffectOverlay(
+  ctx: CanvasRenderingContext2D,
+  logicalWidth: number,
+  logicalHeight: number,
+  effect: ActiveVisualEffect
+) {
+  if (effect.intensity <= 0.005) return;
+  ctx.save();
+
+  if (effect.type === 'cut_to_black') {
+    ctx.globalAlpha = Math.max(0, Math.min(1, effect.intensity));
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+  } else if (effect.type === 'red_flash') {
+    const clamped = Math.max(0, Math.min(1, effect.intensity));
+    // Crimson full-frame wash
+    ctx.fillStyle = `rgba(220, 38, 38, ${(clamped * 0.48).toFixed(4)})`;
+    ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+
+    // Intense radial edge vignette for dramatic alarm/flash impact
+    const cx = logicalWidth / 2;
+    const cy = logicalHeight / 2;
+    const innerR = Math.min(logicalWidth, logicalHeight) * 0.24;
+    const outerR = Math.hypot(cx, cy);
+    const grad = ctx.createRadialGradient(cx, cy, innerR, cx, cy, outerR);
+    grad.addColorStop(0, 'rgba(220, 38, 38, 0)');
+    grad.addColorStop(1, `rgba(153, 27, 27, ${(clamped * 0.85).toFixed(4)})`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+  }
+
+  ctx.restore();
+}
+
+function pickGifFrameBitmap(
+  track: DecodedGifTrack,
+  localElapsedMs: number
+): ImageBitmap {
+  const safeMs =
+    ((localElapsedMs % track.totalDurationMs) + track.totalDurationMs) %
+    track.totalDurationMs;
+  let acc = 0;
+  for (const frame of track.frames) {
+    acc += frame.durationMs;
+    if (safeMs <= acc) {
+      return frame.bitmap;
+    }
+  }
+  return track.frames[track.frames.length - 1].bitmap;
 }
 
 function drawStageOverlays(
@@ -3029,7 +3329,8 @@ function drawStageOverlays(
   logicalHeight: number,
   overlays: StageOverlay[],
   elapsedSec: number,
-  imageCache: Map<string, HTMLImageElement>
+  imageCache: Map<string, HTMLImageElement>,
+  gifCache?: Map<string, DecodedGifTrack>
 ) {
   ctx.save();
   ctx.beginPath();
@@ -3037,6 +3338,9 @@ function drawStageOverlays(
   ctx.clip();
 
   for (const overlay of overlays) {
+    // Skip empty GIF placeholders in exported video frames
+    if (overlay.kind === 'image' && !overlay.imageDataUrl) continue;
+
     const vis = evaluateOverlayVisibility(overlay, elapsedSec, true);
     if (!vis.visible || vis.opacity <= 0.005) continue;
 
@@ -3052,6 +3356,7 @@ function drawStageOverlays(
     ctx.translate(-w / 2, -h / 2);
 
     if (overlay.kind === 'image' && overlay.imageDataUrl) {
+      const gifTrack = gifCache?.get(overlay.imageDataUrl);
       const img = imageCache.get(overlay.imageDataUrl);
       const radius = Math.max(0, overlay.imageBorderRadius ?? 14);
 
@@ -3068,7 +3373,14 @@ function drawStageOverlays(
       ctx.save();
       roundedRectPath(ctx, 0, 0, w, h, radius);
       ctx.clip();
-      if (img && img.naturalWidth > 0) {
+      if (gifTrack) {
+        const localMs =
+          overlay.timingMode === 'timed'
+            ? Math.max(0, (elapsedSec - overlay.startSec) * 1000)
+            : elapsedSec * 1000;
+        const bitmap = pickGifFrameBitmap(gifTrack, localMs);
+        ctx.drawImage(bitmap, 0, 0, w, h);
+      } else if (img && img.naturalWidth > 0) {
         ctx.drawImage(img, 0, 0, w, h);
       }
       ctx.restore();

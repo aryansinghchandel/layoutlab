@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  ClipboardPaste,
   Download,
   Maximize2,
   Minimize2,
@@ -24,10 +25,14 @@ import {
 } from './components/EditorPanel';
 import { HomePage } from './components/HomePage';
 import { PreviewCanvas } from './components/PreviewCanvas';
+import { ScriptAutoBuildModal } from './components/ScriptAutoBuildModal';
 import {
+  type ActiveVisualEffect,
   type AiSkin,
   type AnimationFormat,
+  type BackgroundLoopConfig,
   type ChatMessage,
+  DEFAULT_BACKGROUND_LOOP,
   type DeviceMode,
   getEffectivePlaybackMultiplier,
   type ImageFormat,
@@ -37,16 +42,19 @@ import {
   MULTI_AI_SAMPLE_MESSAGES,
   type PlaybackSpeed,
   type PreviewMode,
+  type SoundBankFile,
   STAGE_LOGICAL_HEIGHT,
   STAGE_LOGICAL_WIDTH,
   type StageOverlay,
   type ThemeMode,
   type ThinkingSenderInfo,
+  type VideoAudioMode,
   type VideoQuality,
 } from './types';
 import { exportCleanImage } from './utils/exportPng';
 import {
   type AnimationExportController,
+  exportAudioStemWav,
   startNativeAnimationExport,
 } from './utils/exportVideo';
 import { buildAnimationTimeline } from './utils/nativeCanvasRenderer';
@@ -55,7 +63,13 @@ import {
   createImageOverlayFromFile,
   createOverlayId,
 } from './utils/overlays';
+import { autoBuildFromScript } from './utils/scriptParser';
 import { AI_SKINS } from './utils/skins';
+import {
+  buildMasterAudioSchedule,
+  decodeSoundBankFiles,
+  LiveAudioEngine,
+} from './utils/soundEngine';
 import type { ScriptTemplate } from './utils/templates';
 import {
   isOfflineStudioPath,
@@ -106,12 +120,24 @@ export default function App() {
   const [enableThoughtPill, setEnableThoughtPill] = useState<boolean>(false);
   const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
   const [videoQuality, setVideoQuality] = useState<VideoQuality>('1080p');
+  const [videoAudioMode, setVideoAudioMode] = useState<VideoAudioMode>('baked');
   const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [isExportingWav, setIsExportingWav] = useState<boolean>(false);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [exportProgress, setExportProgress] = useState<number>(0);
   const [exportFrame, setExportFrame] = useState<number>(0);
   const [exportTotalFrames, setExportTotalFrames] = useState<number>(0);
   const [exportError, setExportError] = useState<string | null>(null);
+
+  // Paste Script Modal + Sound Bank + Background Loop state
+  const [scriptModalOpen, setScriptModalOpen] = useState<boolean>(false);
+  const [soundBank, setSoundBank] = useState<SoundBankFile[]>([]);
+  const [soundBankLoading, setSoundBankLoading] = useState<boolean>(false);
+  const [soundBankStatus, setSoundBankStatus] = useState<string | null>(null);
+  const [masterAudioMuted, setMasterAudioMuted] = useState<boolean>(false);
+  const [backgroundLoop, setBackgroundLoop] = useState<BackgroundLoopConfig>(
+    DEFAULT_BACKGROUND_LOOP
+  );
 
   // Live typing & streaming playback state
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -120,13 +146,15 @@ export default function App() {
   const [isThinking, setIsThinking] = useState<boolean>(false);
   const [thinkingSender, setThinkingSender] =
     useState<ThinkingSenderInfo | null>(null);
+  const [activeVisualEffect, setActiveVisualEffect] =
+    useState<ActiveVisualEffect | null>(null);
   const [playbackTimeSec, setPlaybackTimeSec] = useState<number>(0);
   const [scrubTimeSec, setScrubTimeSec] = useState<number | null>(null);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const [composerDraft, setComposerDraft] = useState<string>('');
   const [sendHighlighted, setSendHighlighted] = useState<boolean>(false);
 
-  // 16:9 Stage Overlays (full-time or timed text boxes & image popups)
+  // 16:9 Stage Overlays (full-time or timed text boxes & image/GIF popups)
   const [overlays, setOverlays] = useState<StageOverlay[]>([]);
   const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
 
@@ -142,8 +170,25 @@ export default function App() {
   const overlaysRef = useRef<StageOverlay[]>(overlays);
   const skinRef = useRef<AiSkin>(skin);
   const themeRef = useRef<ThemeMode>(theme);
+  const previewModeRef = useRef<PreviewMode>(previewMode);
   const scrubTimeSecRef = useRef<number | null>(scrubTimeSec);
+  const soundBankRef = useRef<SoundBankFile[]>(soundBank);
+  const backgroundLoopRef = useRef<BackgroundLoopConfig>(backgroundLoop);
+  const masterAudioMutedRef = useRef<boolean>(masterAudioMuted);
+  const liveAudioRef = useRef<LiveAudioEngine | null>(null);
   const animationExportRef = useRef<AnimationExportController | null>(null);
+
+  const getLiveAudioEngine = useCallback((): LiveAudioEngine => {
+    if (!liveAudioRef.current) {
+      liveAudioRef.current = new LiveAudioEngine();
+    }
+    return liveAudioRef.current;
+  }, []);
+
+  const staticDisplayMessages = useMemo(
+    () => messages.filter((m) => !m.cueKind),
+    [messages]
+  );
 
   const totalDurationSec = useMemo(() => {
     if (messages.length === 0) return 6;
@@ -192,8 +237,24 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    previewModeRef.current = previewMode;
+  }, [previewMode]);
+
+  useEffect(() => {
     scrubTimeSecRef.current = scrubTimeSec;
   }, [scrubTimeSec]);
+
+  useEffect(() => {
+    soundBankRef.current = soundBank;
+  }, [soundBank]);
+
+  useEffect(() => {
+    backgroundLoopRef.current = backgroundLoop;
+  }, [backgroundLoop]);
+
+  useEffect(() => {
+    masterAudioMutedRef.current = masterAudioMuted;
+  }, [masterAudioMuted]);
 
   useEffect(() => {
     totalDurationSecRef.current = totalDurationSec;
@@ -216,10 +277,12 @@ export default function App() {
       window.cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
     }
+    liveAudioRef.current?.stopAll();
     cancelActiveExport();
     setIsPlaying(false);
     setIsThinking(false);
     setThinkingSender(null);
+    setActiveVisualEffect(null);
     setPlaybackTimeSec(0);
     setScrubTimeSec(null);
     setStreamingMessageId(null);
@@ -238,6 +301,10 @@ export default function App() {
       if (animationExportRef.current) {
         animationExportRef.current.cancel();
         animationExportRef.current = null;
+      }
+      if (liveAudioRef.current) {
+        liveAudioRef.current.dispose();
+        liveAudioRef.current = null;
       }
     };
   }, []);
@@ -338,11 +405,56 @@ export default function App() {
         Math.min(timeline.totalDurationMs, startAtSec * 1000)
       );
 
+      // Build synced Web Audio schedule (Background Loop + per-line SFX + timed overlay SFX)
+      const currentSoundBank = soundBankRef.current;
+      const audioSchedule = buildMasterAudioSchedule({
+        timeline,
+        messages: scriptSnapshot,
+        overlays: overlaysRef.current,
+        previewMode: previewModeRef.current,
+        soundBank: currentSoundBank,
+        backgroundLoop: backgroundLoopRef.current,
+        masterMuted: false, // live masterAudioMutedRef is checked dynamically
+      });
+      const audioFileMap = new Map(currentSoundBank.map((f) => [f.id, f]));
+      let liveAudio: LiveAudioEngine | null = null;
+      if (
+        audioSchedule.events.length > 0 ||
+        audioSchedule.backgroundFile !== null
+      ) {
+        liveAudio = getLiveAudioEngine();
+        liveAudio.stopAll();
+        liveAudio.unlock();
+        if (audioSchedule.backgroundFile) {
+          const initialBgVol =
+            masterAudioMutedRef.current || backgroundLoopRef.current.muted
+              ? 0
+              : audioSchedule.backgroundVolume;
+          liveAudio.startBackgroundLoop(
+            audioSchedule.backgroundFile.buffer,
+            initialBgVol,
+            clampedStartMs / 1000
+          );
+        }
+      } else {
+        liveAudioRef.current?.stopAll();
+      }
+
+      let nextAudioEventIdx = 0;
+      while (
+        nextAudioEventIdx < audioSchedule.events.length &&
+        audioSchedule.events[nextAudioEventIdx].timeMs < clampedStartMs - 15
+      ) {
+        nextAudioEventIdx += 1;
+      }
+      let wasDuckedForBlackout = false;
+
       setScrubTimeSec(null);
       setIsPlaying(true);
       setDisplayedMessages([]);
       setIsThinking(false);
       setThinkingSender(null);
+      setActiveVisualEffect(null);
       setPlaybackTimeSec(clampedStartMs / 1000);
       setStreamingMessageId(null);
       setComposerDraft('');
@@ -352,6 +464,7 @@ export default function App() {
       let prevTs: number | null = null;
       let accumulatedMs = clampedStartMs;
       let lastSignature = '';
+      let lastVfxSig = '';
       let prevRenderedMessages: ChatMessage[] = [];
 
       const tick = (now: number) => {
@@ -372,13 +485,54 @@ export default function App() {
 
         const currentVideoSec = accumulatedMs / 1000;
 
+        // Fire sample-accurate one-shot SFX events with 25ms lookahead
+        if (liveAudio && nextAudioEventIdx < audioSchedule.events.length) {
+          while (
+            nextAudioEventIdx < audioSchedule.events.length &&
+            audioSchedule.events[nextAudioEventIdx].timeMs <= accumulatedMs + 25
+          ) {
+            const ev = audioSchedule.events[nextAudioEventIdx];
+            nextAudioEventIdx += 1;
+            if (!masterAudioMutedRef.current) {
+              const file = audioFileMap.get(ev.fileId);
+              if (file) {
+                const delaySec = Math.max(0, (ev.timeMs - accumulatedMs) / 1000);
+                liveAudio.playOneShot(file.buffer, ev.volume, {
+                  delaySec,
+                  maxDurationSec: ev.maxDurationSec,
+                });
+              }
+            }
+          }
+        }
+
         const frame = timeline.evaluateAt(accumulatedMs);
+
+        // Duck background loop immediately during hard cut to black
+        if (liveAudio && audioSchedule.backgroundFile) {
+          const inBlackout = frame.activeVisualEffect?.type === 'cut_to_black';
+          if (inBlackout !== wasDuckedForBlackout) {
+            wasDuckedForBlackout = inBlackout;
+            liveAudio.setBackgroundDucked(inBlackout);
+          }
+        }
+
         let nextStreamingId: string | null = null;
         for (let i = 0; i < frame.messages.length; i++) {
           if (frame.messages[i].isStreaming) {
             nextStreamingId = frame.messages[i].id;
             break;
           }
+        }
+
+        const vfxSig = frame.activeVisualEffect
+          ? `${frame.activeVisualEffect.type}:${Math.round(
+              frame.activeVisualEffect.intensity * 100
+            )}`
+          : '';
+        if (vfxSig !== lastVfxSig) {
+          lastVfxSig = vfxSig;
+          setActiveVisualEffect(frame.activeVisualEffect);
         }
 
         const lastMsg = frame.messages[frame.messages.length - 1];
@@ -445,9 +599,11 @@ export default function App() {
 
         if (accumulatedMs >= timeline.totalDurationMs) {
           rafIdRef.current = null;
+          liveAudioRef.current?.stopAll();
           setIsPlaying(false);
           setIsThinking(false);
           setThinkingSender(null);
+          setActiveVisualEffect(null);
           setPlaybackTimeSec(0);
           setStreamingMessageId(null);
           setComposerDraft('');
@@ -460,7 +616,7 @@ export default function App() {
 
       rafIdRef.current = window.requestAnimationFrame(tick);
     },
-    []
+    [getLiveAudioEngine]
   );
 
   const handleTogglePlayback = useCallback(() => {
@@ -486,6 +642,7 @@ export default function App() {
         }
         setIsPlaying(false);
       }
+      liveAudioRef.current?.stopAll();
 
       if (sec === null || messagesRef.current.length === 0) {
         setScrubTimeSec(null);
@@ -493,6 +650,7 @@ export default function App() {
         setDisplayedMessages([]);
         setIsThinking(false);
         setThinkingSender(null);
+        setActiveVisualEffect(null);
         setStreamingMessageId(null);
         setComposerDraft('');
         setSendHighlighted(false);
@@ -533,6 +691,7 @@ export default function App() {
       );
       setIsThinking(frame.isThinking);
       setThinkingSender(frame.thinkingSender);
+      setActiveVisualEffect(frame.activeVisualEffect);
       setStreamingMessageId(nextStreamingId);
       setComposerDraft(frame.composerDraft);
       setSendHighlighted(frame.sendHighlighted);
@@ -644,6 +803,143 @@ export default function App() {
     [stopAnimation]
   );
 
+  const handleUpdateMessageMeta = useCallback(
+    (id: string, patch: Partial<ChatMessage>) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      setMessages((prev) =>
+        prev.map((msg) => (msg.id === id ? { ...msg, ...patch } : msg))
+      );
+    },
+    [stopAnimation]
+  );
+
+  // Sound Bank & Script Auto-Build handlers
+  const handleLoadSoundBankFiles = useCallback(
+    async (files: FileList | File[]) => {
+      const list = Array.from(files);
+      if (list.length === 0) return;
+      setSoundBankLoading(true);
+      setSoundBankStatus(`Decoding ${list.length} audio files...`);
+      try {
+        const engine = getLiveAudioEngine();
+        const ctx = engine.ensureContext();
+        const { loaded, skippedCount } = await decodeSoundBankFiles(list, ctx);
+        if (loaded.length === 0) {
+          setSoundBankStatus(
+            'No supported audio files found (.mp3, .wav, .ogg, .m4a).'
+          );
+          return;
+        }
+        setSoundBank((prev) => {
+          const byName = new Map(prev.map((f) => [f.name.toLowerCase(), f]));
+          for (const item of loaded) {
+            byName.set(item.name.toLowerCase(), item);
+          }
+          return Array.from(byName.values()).sort((a, b) =>
+            a.name.localeCompare(b.name)
+          );
+        });
+        setSoundBankStatus(
+          skippedCount > 0
+            ? `Loaded ${loaded.length} sounds (${skippedCount} skipped). Fuzzy-matched to script.`
+            : `Loaded ${loaded.length} sounds & auto-matched to script cues.`
+        );
+      } catch {
+        setSoundBankStatus('Unable to decode selected audio files.');
+      } finally {
+        setSoundBankLoading(false);
+      }
+    },
+    [getLiveAudioEngine]
+  );
+
+  const handleClearSoundBank = useCallback(() => {
+    liveAudioRef.current?.stopAll();
+    setSoundBank([]);
+    setSoundBankStatus(null);
+  }, []);
+
+  const handleToggleMasterAudioMute = useCallback(() => {
+    setMasterAudioMuted((prev) => {
+      const nextMuted = !prev;
+      if (liveAudioRef.current) {
+        if (nextMuted) {
+          liveAudioRef.current.setBackgroundLoopGain(0);
+        } else if (
+          backgroundLoopRef.current.enabled &&
+          !backgroundLoopRef.current.muted
+        ) {
+          liveAudioRef.current.setBackgroundLoopGain(
+            backgroundLoopRef.current.volume
+          );
+        }
+      }
+      return nextMuted;
+    });
+  }, []);
+
+  const handleUpdateBackgroundLoop = useCallback(
+    (patch: Partial<BackgroundLoopConfig>) => {
+      setBackgroundLoop((prev) => {
+        const next = { ...prev, ...patch };
+        if (liveAudioRef.current && isPlayingRef.current) {
+          if (masterAudioMutedRef.current || !next.enabled || next.muted) {
+            liveAudioRef.current.setBackgroundLoopGain(0);
+          } else {
+            liveAudioRef.current.setBackgroundLoopGain(next.volume);
+          }
+        }
+        return next;
+      });
+    },
+    []
+  );
+
+  const handleAuditionSoundFile = useCallback(
+    (fileId: string, volume = 0.9) => {
+      const file = soundBankRef.current.find((f) => f.id === fileId);
+      if (!file) return;
+      const engine = getLiveAudioEngine();
+      engine.unlock();
+      engine.playOneShot(file.buffer, volume, { maxDurationSec: 3.5 });
+    },
+    [getLiveAudioEngine]
+  );
+
+  const handleAutoBuildScript = useCallback(
+    (rawScript: string) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      const built = autoBuildFromScript(rawScript, {
+        speed: speedRef.current,
+        showBottomBar: showBottomBarRef.current,
+        soundBank: soundBankRef.current,
+        currentSkin: skinRef.current,
+      });
+
+      setMessages(built.messages);
+      setOverlays(built.overlays);
+      setBackgroundLoop(built.backgroundLoop);
+      setSelectedOverlayId(null);
+      setScrubTimeSec(null);
+      setActiveVisualEffect(null);
+      setExportError(null);
+
+      if (built.recommendedSkin !== skinRef.current) {
+        setSkin(built.recommendedSkin);
+        setModelLabel(AI_SKINS[built.recommendedSkin].defaultModel);
+      }
+
+      if (built.recommendedPreviewMode === 'clean16x9') {
+        setPreviewMode('clean16x9');
+        setShowHeader(false);
+        setShowSidebar(false);
+        setShowFooterDisclaimer(false);
+        setShowBottomBar(true);
+      }
+    },
+    [stopAnimation]
+  );
+
   const handleToggleRole = useCallback(
     (id: string) => {
       if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
@@ -742,6 +1038,45 @@ export default function App() {
       );
     },
     []
+  );
+
+  const handleUploadOverlayImage = useCallback(
+    (overlayId: string, file: File) => {
+      if (isPlayingRef.current || isRecordingRef.current) stopAnimation();
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+        if (!dataUrl) return;
+        const img = new Image();
+        img.onload = () => {
+          const aspect =
+            img.naturalWidth && img.naturalHeight
+              ? img.naturalWidth / img.naturalHeight
+              : 16 / 9;
+          setOverlays((prev) =>
+            prev.map((ov) => {
+              if (ov.id !== overlayId) return ov;
+              const nextH = Math.max(48, Math.min(440, Math.round(ov.width / aspect)));
+              return {
+                ...ov,
+                imageDataUrl: dataUrl,
+                imageName: file.name,
+                imageAspectRatio: aspect,
+                isGifPlaceholder: false,
+                height: nextH,
+              };
+            })
+          );
+          setSelectedOverlayId(overlayId);
+        };
+        img.onerror = () => {
+          setExportError('Unable to read selected GIF or image file.');
+        };
+        img.src = dataUrl;
+      };
+      reader.readAsDataURL(file);
+    },
+    [stopAnimation]
   );
 
   const handleDuplicateOverlay = useCallback((id: string) => {
@@ -865,6 +1200,10 @@ export default function App() {
         speed: playbackSpeed,
         quality: effectiveQuality,
         format,
+        audioMode: videoAudioMode,
+        soundBank: soundBankRef.current,
+        backgroundLoop: backgroundLoopRef.current,
+        masterAudioMuted: masterAudioMutedRef.current,
         onProgress: ({ percent, currentFrame, totalFrames }) => {
           setExportProgress(percent);
           setExportFrame(currentFrame);
@@ -905,9 +1244,63 @@ export default function App() {
       skin,
       stopAnimation,
       theme,
+      videoAudioMode,
       videoQuality,
     ]
   );
+
+  const handleExportWavStem = useCallback(async () => {
+    if (isExportingWav || isRecordingRef.current || messagesRef.current.length === 0) {
+      return;
+    }
+    setExportError(null);
+    setIsExportingWav(true);
+    try {
+      await exportAudioStemWav({
+        messages: messagesRef.current.map((m) => ({ ...m })),
+        config: {
+          skin,
+          modelLabel,
+          theme,
+          device,
+          previewMode,
+          cleanFontSize,
+          showHeader,
+          showSidebar,
+          showIosStatusBar,
+          showBottomBar,
+          showFooterDisclaimer,
+          enableThoughtPill,
+          overlays: overlaysRef.current.map((o) => ({ ...o })),
+        },
+        speed: playbackSpeed,
+        soundBank: soundBankRef.current,
+        backgroundLoop: backgroundLoopRef.current,
+        masterMuted: masterAudioMutedRef.current,
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Unable to export WAV audio stem.';
+      setExportError(message);
+    } finally {
+      setIsExportingWav(false);
+    }
+  }, [
+    cleanFontSize,
+    device,
+    enableThoughtPill,
+    isExportingWav,
+    modelLabel,
+    playbackSpeed,
+    previewMode,
+    showBottomBar,
+    showFooterDisclaimer,
+    showHeader,
+    showIosStatusBar,
+    showSidebar,
+    skin,
+    theme,
+  ]);
 
   const handleExportAnimationClick = useCallback(
     (format: AnimationFormat) => {
@@ -986,6 +1379,16 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={isRecording}
+              onClick={() => setScriptModalOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <ClipboardPaste className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Paste Script</span>
+            </button>
+
             {isOfflineRoute && !offlineStudio.isInstalled && (
               <button
                 type="button"
@@ -1075,25 +1478,42 @@ export default function App() {
             onUpdateMessageThought={handleUpdateMessageThought}
             onUpdateMessageAttachment={handleUpdateMessageAttachment}
             onUpdateMessageSender={handleUpdateMessageSender}
+            onUpdateMessageMeta={handleUpdateMessageMeta}
             onToggleRole={handleToggleRole}
             onMoveMessage={handleMoveMessage}
             onDeleteMessage={handleDeleteMessage}
             onClearAll={handleClearAll}
             onLoadSample={handleLoadSample}
+            onOpenScriptModal={() => setScriptModalOpen(true)}
+            soundBank={soundBank}
+            soundBankLoading={soundBankLoading}
+            soundBankStatus={soundBankStatus}
+            onLoadSoundBankFiles={handleLoadSoundBankFiles}
+            onClearSoundBank={handleClearSoundBank}
+            masterAudioMuted={masterAudioMuted}
+            onToggleMasterAudioMute={handleToggleMasterAudioMute}
+            backgroundLoop={backgroundLoop}
+            onUpdateBackgroundLoop={handleUpdateBackgroundLoop}
+            onAuditionSoundFile={handleAuditionSoundFile}
             overlays={overlays}
             selectedOverlayId={selectedOverlayId}
             onSelectOverlay={setSelectedOverlayId}
             onAddTextOverlay={handleAddTextOverlay}
             onAddImageOverlayFile={handleAddImageOverlayFile}
+            onUploadOverlayImage={handleUploadOverlayImage}
             onDeleteOverlay={handleDeleteOverlay}
             onMoveOverlay={handleMoveOverlay}
             onExportImage={handleExportImage}
             onExportAnimation={handleExportAnimationClick}
             onExportVideo={handleExportVideoClick}
+            onExportWavStem={() => void handleExportWavStem()}
             onCancelExport={cancelActiveExport}
             videoQuality={videoQuality}
             onVideoQualityChange={setVideoQuality}
+            videoAudioMode={videoAudioMode}
+            onVideoAudioModeChange={setVideoAudioMode}
             isExporting={isExporting}
+            isExportingWav={isExportingWav}
             isRecording={isRecording}
             exportProgress={exportProgress}
             exportFrame={exportFrame}
@@ -1122,7 +1542,9 @@ export default function App() {
           showFooterDisclaimer={showFooterDisclaimer}
           enableThoughtPill={enableThoughtPill}
           messages={
-            isPlaying || scrubTimeSec !== null ? displayedMessages : messages
+            isPlaying || scrubTimeSec !== null
+              ? displayedMessages
+              : staticDisplayMessages
           }
           isPlaying={isPlaying}
           isExporting={isExporting}
@@ -1143,11 +1565,25 @@ export default function App() {
           onSelectOverlay={setSelectedOverlayId}
           onAddTextOverlay={handleAddTextOverlay}
           onAddImageOverlayFile={handleAddImageOverlayFile}
+          onUploadOverlayImage={handleUploadOverlayImage}
           onUpdateOverlay={handleUpdateOverlay}
           onDuplicateOverlay={handleDuplicateOverlay}
           onDeleteOverlay={handleDeleteOverlay}
+          activeVisualEffect={activeVisualEffect}
+          soundBank={soundBank}
+          onAuditionSoundFile={handleAuditionSoundFile}
         />
       </div>
+
+      {/* Paste Script & Auto-Build Modal */}
+      <ScriptAutoBuildModal
+        open={scriptModalOpen}
+        onClose={() => setScriptModalOpen(false)}
+        soundBank={soundBank}
+        soundBankLoading={soundBankLoading}
+        onLoadSoundBankFiles={handleLoadSoundBankFiles}
+        onAutoBuild={handleAutoBuildScript}
+      />
 
       {/* Offline Install Guide Modal (iOS Safari / Manual Install Fallback) */}
       {isOfflineRoute && installGuideOpen && (

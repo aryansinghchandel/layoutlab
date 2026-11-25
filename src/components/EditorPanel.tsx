@@ -5,14 +5,19 @@ import {
   Bell,
   ChevronDown,
   ChevronRight,
+  ClipboardPaste,
   Clock,
   Download,
+  FileAudio,
   FileText,
   Film,
+  Flame,
+  FolderOpen,
   Image as ImageIcon,
   Loader2,
   Monitor,
   Moon,
+  Music,
   Paperclip,
   Play,
   Plus,
@@ -25,11 +30,15 @@ import {
   Type,
   Upload,
   Video,
+  Volume2,
+  VolumeX,
   X,
+  Zap,
 } from 'lucide-react';
 import {
   type AiSkin,
   type AnimationFormat,
+  type BackgroundLoopConfig,
   type ChatMessage,
   CUSTOM_AI_COLORS,
   CUSTOM_ICON_IDS,
@@ -43,11 +52,15 @@ import {
   PLAYBACK_SPEEDS,
   type PlaybackSpeed,
   type PreviewMode,
+  type SoundBankFile,
   type StageOverlay,
   type ThemeMode,
+  type VideoAudioMode,
   type VideoQuality,
+  type VisualEffectType,
 } from '../types';
 import { AI_SKINS, SKIN_ORDER } from '../utils/skins';
+import { fuzzyMatchSoundFile, resolveSfxFile } from '../utils/soundEngine';
 import {
   ClaudeStarburstIcon,
   CustomAiGlyphIcon,
@@ -102,25 +115,42 @@ interface EditorPanelProps {
     attachment: MessageAttachment | null
   ) => void;
   onUpdateMessageSender: (id: string, patch: MessageSenderPatch) => void;
+  onUpdateMessageMeta: (id: string, patch: Partial<ChatMessage>) => void;
   onToggleRole: (id: string) => void;
   onMoveMessage: (index: number, direction: 'up' | 'down') => void;
   onDeleteMessage: (id: string) => void;
   onClearAll: () => void;
   onLoadSample: () => void;
+  onOpenScriptModal: () => void;
+  soundBank: SoundBankFile[];
+  soundBankLoading: boolean;
+  soundBankStatus: string | null;
+  onLoadSoundBankFiles: (files: FileList | File[]) => void;
+  onClearSoundBank: () => void;
+  masterAudioMuted: boolean;
+  onToggleMasterAudioMute: () => void;
+  backgroundLoop: BackgroundLoopConfig;
+  onUpdateBackgroundLoop: (patch: Partial<BackgroundLoopConfig>) => void;
+  onAuditionSoundFile: (fileId: string, volume?: number) => void;
   overlays: StageOverlay[];
   selectedOverlayId: string | null;
   onSelectOverlay: (id: string | null) => void;
   onAddTextOverlay: () => void;
   onAddImageOverlayFile: (file: File) => void;
+  onUploadOverlayImage: (overlayId: string, file: File) => void;
   onDeleteOverlay: (id: string) => void;
   onMoveOverlay: (index: number, direction: 'up' | 'down') => void;
   onExportImage: (format: ImageFormat) => void;
   onExportAnimation: (format: AnimationFormat) => void;
   onExportVideo: () => void;
+  onExportWavStem: () => void;
   onCancelExport: () => void;
   videoQuality: VideoQuality;
   onVideoQualityChange: (quality: VideoQuality) => void;
+  videoAudioMode: VideoAudioMode;
+  onVideoAudioModeChange: (mode: VideoAudioMode) => void;
   isExporting: boolean;
+  isExportingWav: boolean;
   isRecording: boolean;
   exportProgress: number;
   exportFrame: number;
@@ -235,25 +265,42 @@ export const EditorPanel = React.memo(function EditorPanel({
   onUpdateMessageThought,
   onUpdateMessageAttachment,
   onUpdateMessageSender,
+  onUpdateMessageMeta,
   onToggleRole,
   onMoveMessage,
   onDeleteMessage,
   onClearAll,
   onLoadSample,
+  onOpenScriptModal,
+  soundBank,
+  soundBankLoading,
+  soundBankStatus,
+  onLoadSoundBankFiles,
+  onClearSoundBank,
+  masterAudioMuted,
+  onToggleMasterAudioMute,
+  backgroundLoop,
+  onUpdateBackgroundLoop,
+  onAuditionSoundFile,
   overlays,
   selectedOverlayId,
   onSelectOverlay,
   onAddTextOverlay,
   onAddImageOverlayFile,
+  onUploadOverlayImage,
   onDeleteOverlay,
   onMoveOverlay,
   onExportImage,
   onExportAnimation,
   onExportVideo,
+  onExportWavStem,
   onCancelExport,
   videoQuality,
   onVideoQualityChange,
+  videoAudioMode,
+  onVideoAudioModeChange,
   isExporting,
+  isExportingWav,
   isRecording,
   exportProgress,
   exportFrame,
@@ -273,6 +320,28 @@ export const EditorPanel = React.memo(function EditorPanel({
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const avatarInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const overlayImgInputRef = useRef<HTMLInputElement | null>(null);
+  const overlayRowUploadRef = useRef<HTMLInputElement | null>(null);
+  const pendingOverlayUploadIdRef = useRef<string | null>(null);
+  const soundBankMultiInputRef = useRef<HTMLInputElement | null>(null);
+  const soundBankFolderInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const folderInput = soundBankFolderInputRef.current;
+    if (folderInput) {
+      folderInput.setAttribute('webkitdirectory', '');
+      folderInput.setAttribute('directory', '');
+    }
+  }, []);
+
+  const resolvedBgFile = resolveSfxFile(
+    backgroundLoop.cueName,
+    backgroundLoop.selectedFileId,
+    soundBank
+  );
+  const autoMatchedBgFile = fuzzyMatchSoundFile(
+    backgroundLoop.cueName,
+    soundBank
+  );
 
   useEffect(() => {
     if (!openMenu) return;
@@ -686,11 +755,26 @@ export const EditorPanel = React.memo(function EditorPanel({
                 <input
                   ref={overlayImgInputRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/gif,image/*"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
                     e.target.value = '';
                     if (file) onAddImageOverlayFile(file);
+                  }}
+                  className="hidden"
+                />
+                <input
+                  ref={overlayRowUploadRef}
+                  type="file"
+                  accept="image/gif,image/*"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    const targetId = pendingOverlayUploadIdRef.current;
+                    e.target.value = '';
+                    pendingOverlayUploadIdRef.current = null;
+                    if (file && targetId) {
+                      onUploadOverlayImage(targetId, file);
+                    }
                   }}
                   className="hidden"
                 />
@@ -707,13 +791,14 @@ export const EditorPanel = React.memo(function EditorPanel({
 
               {overlays.length === 0 ? (
                 <p className="rounded-lg border border-dashed border-slate-200 bg-slate-50/70 px-3 py-2.5 text-[11.5px] leading-relaxed text-slate-500">
-                  Add draggable text boxes or image popups, then drag &amp; resize
+                  Add draggable text boxes or image/GIF popups, then drag &amp; resize
                   directly on the 16:9 stage.
                 </p>
               ) : (
                 <div className="space-y-1.5">
                   {overlays.map((ov, idx) => {
                     const active = selectedOverlayId === ov.id;
+                    const isGifSlot = ov.kind === 'image' && !ov.imageDataUrl;
                     return (
                       <div
                         key={ov.id}
@@ -721,11 +806,19 @@ export const EditorPanel = React.memo(function EditorPanel({
                         className={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-2 transition-colors cursor-pointer ${
                           active
                             ? 'border-blue-500 bg-blue-50/60'
-                            : 'border-slate-200 bg-white hover:bg-slate-50'
+                            : isGifSlot
+                              ? 'border-dashed border-blue-300 bg-blue-50/30 hover:bg-blue-50/60'
+                              : 'border-slate-200 bg-white hover:bg-slate-50'
                         }`}
                       >
                         <div className="flex min-w-0 items-center gap-2">
-                          <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-700">
+                          <span
+                            className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
+                              isGifSlot
+                                ? 'bg-blue-100 text-blue-700'
+                                : 'bg-slate-100 text-slate-700'
+                            }`}
+                          >
                             {ov.kind === 'text' ? (
                               <Type className="h-3.5 w-3.5" />
                             ) : (
@@ -736,21 +829,43 @@ export const EditorPanel = React.memo(function EditorPanel({
                             <p className="truncate text-xs font-semibold text-slate-800">
                               {ov.kind === 'text'
                                 ? ov.text?.trim() || 'Text Box'
-                                : ov.imageName || 'Image Overlay'}
+                                : isGifSlot
+                                  ? `[GIF] ${ov.placeholderLabel || ov.imageName || 'Placeholder'}`
+                                  : ov.imageName || 'Image Overlay'}
                             </p>
-                            <p className="flex items-center gap-1 text-[10.5px] text-slate-500 tabular-nums">
-                              <Clock className="h-2.5 w-2.5" />
-                              {ov.timingMode === 'full'
-                                ? 'Full Video'
-                                : `${ov.startSec.toFixed(1)}s–${ov.endSec.toFixed(1)}s (${ov.transition})`}
+                            <p className="flex items-center gap-1.5 text-[10.5px] text-slate-500 tabular-nums">
+                              <span className="inline-flex items-center gap-1">
+                                <Clock className="h-2.5 w-2.5" />
+                                {ov.timingMode === 'full'
+                                  ? 'Full Video'
+                                  : `${ov.startSec.toFixed(1)}s–${ov.endSec.toFixed(1)}s`}
+                              </span>
+                              {ov.sfxCue && (
+                                <span className="truncate font-mono text-[10px] text-emerald-700">
+                                  · {ov.sfxCue}
+                                </span>
+                              )}
                             </p>
                           </div>
                         </div>
 
                         <div
-                          className="flex items-center gap-0.5 shrink-0"
+                          className="flex items-center gap-1 shrink-0"
                           onClick={(e) => e.stopPropagation()}
                         >
+                          {isGifSlot && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                pendingOverlayUploadIdRef.current = ov.id;
+                                overlayRowUploadRef.current?.click();
+                              }}
+                              className="inline-flex items-center gap-1 rounded-md bg-slate-900 px-2 py-1 text-[10.5px] font-semibold text-white transition-colors hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+                            >
+                              <Upload className="h-2.5 w-2.5" />
+                              Upload GIF
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={idx === 0}
@@ -792,6 +907,244 @@ export const EditorPanel = React.memo(function EditorPanel({
 
         <hr className="border-slate-200" />
 
+        {/* Section 1.8: Sound Bank & Background Loop */}
+        <section aria-labelledby="soundbank-heading" className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <h2
+              id="soundbank-heading"
+              className="text-xs font-semibold tracking-wide text-slate-500 uppercase"
+            >
+              Sound Bank &amp; Audio Sync
+            </h2>
+            <div className="flex items-center gap-1.5">
+              {soundBank.length > 0 && (
+                <span className="rounded-md bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 font-mono text-[10.5px] font-semibold text-emerald-700 tabular-nums">
+                  {soundBank.length} {soundBank.length === 1 ? 'file' : 'files'}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={onToggleMasterAudioMute}
+                title={masterAudioMuted ? 'Unmute all audio' : 'Mute all audio'}
+                aria-label={masterAudioMuted ? 'Unmute all audio' : 'Mute all audio'}
+                className={`inline-flex h-6 w-6 items-center justify-center rounded-md border transition-colors cursor-pointer ${
+                  masterAudioMuted
+                    ? 'border-red-200 bg-red-50 text-red-600'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                {masterAudioMuted ? (
+                  <VolumeX className="h-3.5 w-3.5" />
+                ) : (
+                  <Volume2 className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Primary Ctrl+A Multi-File Loader + Optional Folder Picker */}
+          <div className="flex items-center gap-1.5">
+            <input
+              ref={soundBankMultiInputRef}
+              type="file"
+              multiple
+              accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,.webm"
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  onLoadSoundBankFiles(e.target.files);
+                }
+                e.target.value = '';
+              }}
+              className="hidden"
+            />
+            <input
+              ref={soundBankFolderInputRef}
+              type="file"
+              multiple
+              accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,.webm"
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  onLoadSoundBankFiles(e.target.files);
+                }
+                e.target.value = '';
+              }}
+              className="hidden"
+            />
+            <button
+              type="button"
+              disabled={soundBankLoading || isRecording}
+              onClick={() => soundBankMultiInputRef.current?.click()}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+            >
+              {soundBankLoading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <FileAudio className="h-3.5 w-3.5 text-slate-600" />
+              )}
+              <span>
+                {soundBank.length > 0
+                  ? 'Add / Load Sound Bank'
+                  : 'Load Sound Bank (Ctrl+A)'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              disabled={soundBankLoading || isRecording}
+              onClick={() => soundBankFolderInputRef.current?.click()}
+              title="Pick an entire SFX folder"
+              className="inline-flex items-center justify-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              <span>Folder</span>
+            </button>
+
+            {soundBank.length > 0 && (
+              <button
+                type="button"
+                disabled={isRecording}
+                onClick={onClearSoundBank}
+                title="Clear Sound Bank"
+                aria-label="Clear Sound Bank"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-400 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 cursor-pointer"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+
+          {soundBankStatus && (
+            <p className="text-[11px] font-medium text-slate-500">
+              {soundBankStatus}
+            </p>
+          )}
+
+          {/* Background Loop Controls */}
+          <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50/75 p-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <label className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={backgroundLoop.enabled}
+                  onChange={(e) =>
+                    onUpdateBackgroundLoop({ enabled: e.target.checked })
+                  }
+                  className="h-3.5 w-3.5 rounded border-slate-300 accent-slate-900"
+                />
+                <Music className="h-3.5 w-3.5 text-slate-500" />
+                <span>Background Loop</span>
+              </label>
+
+              {backgroundLoop.cueName && (
+                <span className="max-w-[155px] truncate rounded bg-white border border-slate-200 px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-600">
+                  {backgroundLoop.cueName}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <select
+                aria-label="Background loop audio track"
+                value={backgroundLoop.selectedFileId}
+                onChange={(e) =>
+                  onUpdateBackgroundLoop({
+                    selectedFileId: e.target.value,
+                    enabled:
+                      e.target.value !== 'none'
+                        ? true
+                        : backgroundLoop.enabled,
+                  })
+                }
+                className="h-7 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-800 outline-none focus:border-slate-400"
+              >
+                <option value="auto">
+                  {autoMatchedBgFile
+                    ? `Auto (${autoMatchedBgFile.baseName})`
+                    : backgroundLoop.cueName
+                      ? 'Auto (Unmatched)'
+                      : 'Auto (None)'}
+                </option>
+                <option value="none">No Background Loop</option>
+                {soundBank.map((file) => (
+                  <option key={file.id} value={file.id}>
+                    {file.name}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                disabled={!resolvedBgFile || backgroundLoop.muted}
+                onClick={() => {
+                  if (resolvedBgFile) {
+                    onAuditionSoundFile(
+                      resolvedBgFile.id,
+                      Math.max(0.25, backgroundLoop.volume)
+                    );
+                  }
+                }}
+                title="Preview background loop"
+                aria-label="Preview background loop"
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+              >
+                <Play className="h-3 w-3 fill-current" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  onUpdateBackgroundLoop({ muted: !backgroundLoop.muted })
+                }
+                title={
+                  backgroundLoop.muted
+                    ? 'Unmute background loop'
+                    : 'Mute background loop'
+                }
+                aria-label={
+                  backgroundLoop.muted
+                    ? 'Unmute background loop'
+                    : 'Mute background loop'
+                }
+                className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition-colors cursor-pointer ${
+                  backgroundLoop.muted
+                    ? 'border-red-200 bg-red-50 text-red-600'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                {backgroundLoop.muted ? (
+                  <VolumeX className="h-3.5 w-3.5" />
+                ) : (
+                  <Volume2 className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2 pt-0.5">
+              <span className="text-[10.5px] font-medium text-slate-500 whitespace-nowrap">
+                Loop Vol
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={50}
+                step={1}
+                value={Math.round(backgroundLoop.volume * 100)}
+                onChange={(e) =>
+                  onUpdateBackgroundLoop({
+                    volume: Number(e.target.value) / 100,
+                  })
+                }
+                className="h-1 flex-1 accent-slate-900 cursor-pointer"
+              />
+              <span className="w-8 text-right font-mono text-[10.5px] font-semibold text-slate-700 tabular-nums">
+                {Math.round(backgroundLoop.volume * 100)}%
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <hr className="border-slate-200" />
+
         {/* Section 2: Script Builder (Word-for-Word Message List) */}
         <section aria-labelledby="script-heading" className="space-y-3.5">
           <div className="flex items-center justify-between gap-2">
@@ -822,6 +1175,17 @@ export const EditorPanel = React.memo(function EditorPanel({
               )}
             </div>
           </div>
+
+          {/* Prominent Paste Script & Auto-Build Button */}
+          <button
+            type="button"
+            disabled={isRecording}
+            onClick={onOpenScriptModal}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-3 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+          >
+            <ClipboardPaste className="h-3.5 w-3.5 shrink-0" />
+            <span>Paste Script &amp; Auto-Build</span>
+          </button>
 
           {/* Top Add Prompt / Add AI Reply / Add Event Buttons */}
           <div className="grid grid-cols-3 gap-1.5">
@@ -872,22 +1236,38 @@ export const EditorPanel = React.memo(function EditorPanel({
           ) : (
             <div className="space-y-3">
               {messages.map((msg, index) => {
-                const isUser = msg.role === 'user';
-                const isSystem = msg.role === 'system';
-                const isAssistant = msg.role === 'assistant';
+                const isTypingCue = msg.cueKind === 'typing';
+                const isVisualCue = msg.cueKind === 'visual_effect';
+                const isSpecialCue = isTypingCue || isVisualCue;
+                const isUser = !isSpecialCue && msg.role === 'user';
+                const isSystem = !isSpecialCue && msg.role === 'system';
+                const isAssistant = !isSpecialCue && msg.role === 'assistant';
                 const currentSenderValue = isSystem
                   ? 'system'
                   : isUser
                     ? 'user'
                     : (msg.senderSkin ?? 'chatgpt');
+                const autoMatchedLineSfx = fuzzyMatchSoundFile(
+                  msg.sfxCue,
+                  soundBank
+                );
+                const resolvedLineSfx = resolveSfxFile(
+                  msg.sfxCue,
+                  msg.sfxFileId,
+                  soundBank
+                );
 
                 return (
                   <div
                     key={msg.id}
                     className={`rounded-xl border p-3.5 transition-colors focus-within:border-slate-400 ${
-                      isSystem
-                        ? 'border-slate-200 bg-slate-50/70'
-                        : 'border-slate-200 bg-white'
+                      isVisualCue
+                        ? 'border-red-200 bg-red-50/40'
+                        : isTypingCue
+                          ? 'border-amber-200 bg-amber-50/40'
+                          : isSystem
+                            ? 'border-slate-200 bg-slate-50/70'
+                            : 'border-slate-200 bg-white'
                     }`}
                   >
                     {/* Card Header */}
@@ -900,7 +1280,17 @@ export const EditorPanel = React.memo(function EditorPanel({
                           /
                         </span>
 
-                        {skin === 'multi' ? (
+                        {isTypingCue ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-100/70 px-2 py-0.5 text-[11px] font-semibold text-amber-900 whitespace-nowrap">
+                            <Clock className="h-3 w-3" />
+                            Typing Hold
+                          </span>
+                        ) : isVisualCue ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-100/70 px-2 py-0.5 text-[11px] font-semibold text-red-900 whitespace-nowrap">
+                            <Flame className="h-3 w-3" />
+                            Visual Effect
+                          </span>
+                        ) : skin === 'multi' ? (
                           <div className="flex items-center gap-1.5 min-w-0">
                             {isSystem && (
                               <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500">
@@ -1310,8 +1700,90 @@ export const EditorPanel = React.memo(function EditorPanel({
                       </div>
                     )}
 
-                    {/* Word-for-Word Message Input / Textarea */}
-                    {isSystem ? (
+                    {/* Word-for-Word Message Input / Cue Controls */}
+                    {isTypingCue ? (
+                      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-200/80 bg-white px-2.5 py-2">
+                        {skin === 'multi' && (
+                          <select
+                            aria-label="Typing speaker"
+                            value={msg.senderSkin ?? 'chatgpt'}
+                            onChange={(e) =>
+                              onUpdateMessageSender(msg.id, {
+                                senderSkin: e.target.value as MessageSenderSkin,
+                              })
+                            }
+                            className="h-7 rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-800 outline-none focus:border-slate-400"
+                          >
+                            <option value="chatgpt">ChatGPT</option>
+                            <option value="claude">Claude</option>
+                            <option value="gemini">Gemini</option>
+                            <option value="grok">Grok</option>
+                            <option value="custom">Custom</option>
+                          </select>
+                        )}
+                        <label className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700">
+                          <span>Hold</span>
+                          <input
+                            type="number"
+                            min={0.2}
+                            max={15}
+                            step={0.1}
+                            value={msg.holdDurationSec ?? 1.5}
+                            onChange={(e) =>
+                              onUpdateMessageMeta(msg.id, {
+                                holdDurationSec: Math.max(
+                                  0.2,
+                                  Math.min(15, Number(e.target.value) || 1.5)
+                                ),
+                              })
+                            }
+                            className="h-7 w-16 rounded-md border border-slate-200 bg-slate-50 px-2 font-mono text-xs font-semibold text-slate-900 outline-none focus:border-slate-400"
+                          />
+                          <span className="text-slate-500">sec</span>
+                        </label>
+                      </div>
+                    ) : isVisualCue ? (
+                      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-red-200/80 bg-white px-2.5 py-2">
+                        <select
+                          aria-label="Visual effect type"
+                          value={msg.visualEffect ?? 'cut_to_black'}
+                          onChange={(e) => {
+                            const eff = e.target.value as 'red_flash' | 'cut_to_black';
+                            onUpdateMessageMeta(msg.id, {
+                              visualEffect: eff,
+                              content:
+                                eff === 'cut_to_black'
+                                  ? 'Hard cut to black'
+                                  : 'Screen flashes red',
+                            });
+                          }}
+                          className="h-7 flex-1 rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-800 outline-none focus:border-slate-400"
+                        >
+                          <option value="red_flash">Screen Flashes Red</option>
+                          <option value="cut_to_black">Hard Cut to Black</option>
+                        </select>
+                        <label className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700">
+                          <span>Hold</span>
+                          <input
+                            type="number"
+                            min={0.2}
+                            max={10}
+                            step={0.1}
+                            value={msg.holdDurationSec ?? 1.2}
+                            onChange={(e) =>
+                              onUpdateMessageMeta(msg.id, {
+                                holdDurationSec: Math.max(
+                                  0.2,
+                                  Math.min(10, Number(e.target.value) || 1.0)
+                                ),
+                              })
+                            }
+                            className="h-7 w-16 rounded-md border border-slate-200 bg-slate-50 px-2 font-mono text-xs font-semibold text-slate-900 outline-none focus:border-slate-400"
+                          />
+                          <span className="text-slate-500">s</span>
+                        </label>
+                      </div>
+                    ) : isSystem ? (
                       <input
                         type="text"
                         value={msg.content}
@@ -1333,6 +1805,114 @@ export const EditorPanel = React.memo(function EditorPanel({
                           isAssistant ? 'font-mono text-[12.5px]' : ''
                         }`}
                       />
+                    )}
+
+                    {/* Per-Line SFX Override / Mute Badge & Optional Visual Effect Bar */}
+                    {(msg.sfxCue ||
+                      soundBank.length > 0 ||
+                      (msg.visualEffect && msg.visualEffect !== 'none')) && (
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-2">
+                        {msg.sfxCue && (
+                          <span
+                            title={`Parsed SFX tag: ${msg.sfxCue}`}
+                            className={`inline-flex max-w-[130px] items-center gap-1 truncate rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                              resolvedLineSfx && !msg.sfxMuted
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                : 'border-amber-200 bg-amber-50 text-amber-800'
+                            }`}
+                          >
+                            <Volume2 className="h-2.5 w-2.5 shrink-0" />
+                            <span className="truncate">{msg.sfxCue}</span>
+                          </span>
+                        )}
+
+                        <select
+                          aria-label="Line sound effect"
+                          value={msg.sfxFileId ?? 'auto'}
+                          onChange={(e) =>
+                            onUpdateMessageMeta(msg.id, {
+                              sfxFileId: e.target.value,
+                            })
+                          }
+                          className="h-6 min-w-0 flex-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 text-[10.5px] font-medium text-slate-700 outline-none focus:border-slate-400 focus:bg-white"
+                        >
+                          <option value="auto">
+                            {autoMatchedLineSfx
+                              ? `Auto: ${autoMatchedLineSfx.baseName}`
+                              : msg.sfxCue
+                                ? 'Auto (Load Sound Bank)'
+                                : 'SFX: None'}
+                          </option>
+                          <option value="none">No SFX</option>
+                          {soundBank.map((file) => (
+                            <option key={file.id} value={file.id}>
+                              {file.name}
+                            </option>
+                          ))}
+                        </select>
+
+                        {resolvedLineSfx && (
+                          <button
+                            type="button"
+                            disabled={Boolean(msg.sfxMuted)}
+                            onClick={() =>
+                              onAuditionSoundFile(
+                                resolvedLineSfx.id,
+                                msg.sfxVolume ?? 0.9
+                              )
+                            }
+                            title={`Preview ${resolvedLineSfx.name}`}
+                            aria-label="Preview line SFX"
+                            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-40 cursor-pointer"
+                          >
+                            <Play className="h-2.5 w-2.5 fill-current" />
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateMessageMeta(msg.id, {
+                              sfxMuted: !msg.sfxMuted,
+                            })
+                          }
+                          title={msg.sfxMuted ? 'Unmute line SFX' : 'Mute line SFX'}
+                          aria-label={msg.sfxMuted ? 'Unmute line SFX' : 'Mute line SFX'}
+                          className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border transition-colors cursor-pointer ${
+                            msg.sfxMuted
+                              ? 'border-red-200 bg-red-50 text-red-600'
+                              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
+                          }`}
+                        >
+                          {msg.sfxMuted ? (
+                            <VolumeX className="h-3 w-3" />
+                          ) : (
+                            <Volume2 className="h-3 w-3" />
+                          )}
+                        </button>
+
+                        {!isSpecialCue && (
+                          <select
+                            aria-label="Line visual effect"
+                            value={msg.visualEffect ?? 'none'}
+                            onChange={(e) =>
+                              onUpdateMessageMeta(msg.id, {
+                                visualEffect: e.target.value as VisualEffectType,
+                              })
+                            }
+                            title="Visual screen effect on this line"
+                            className={`h-6 rounded-md border px-1.5 text-[10.5px] font-semibold outline-none ${
+                              msg.visualEffect && msg.visualEffect !== 'none'
+                                ? 'border-red-200 bg-red-50 text-red-700'
+                                : 'border-slate-200 bg-slate-50 text-slate-600'
+                            }`}
+                          >
+                            <option value="none">FX: None</option>
+                            <option value="red_flash">FX: Red Flash</option>
+                            <option value="cut_to_black">FX: Cut Black</option>
+                          </select>
+                        )}
+                      </div>
                     )}
                   </div>
                 );
@@ -1566,38 +2146,75 @@ export const EditorPanel = React.memo(function EditorPanel({
               <div
                 role="menu"
                 aria-label="Download 60fps animation formats"
-                className="absolute bottom-full right-0 z-30 mb-2 w-64 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl"
+                className="absolute bottom-full right-0 z-30 mb-2 w-72 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl"
               >
-                <div className="mb-1 border-b border-slate-100 px-2 py-2">
-                  <div className="mb-1.5 flex items-center justify-between text-[11px] font-semibold text-slate-500">
-                    <span>Output Quality</span>
-                    <span className="font-mono text-[10px] text-slate-400 tabular-nums">
-                      {playbackSpeed}x speed
-                    </span>
+                <div className="mb-1 space-y-2 border-b border-slate-100 px-2 py-2">
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between text-[11px] font-semibold text-slate-500">
+                      <span>Output Quality</span>
+                      <span className="font-mono text-[10px] text-slate-400 tabular-nums">
+                        {playbackSpeed}x speed
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1">
+                      <button
+                        type="button"
+                        onClick={() => onVideoQualityChange('1080p')}
+                        className={`rounded-md py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                          videoQuality === '1080p'
+                            ? 'bg-white text-slate-900 shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        1080p 60fps
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onVideoQualityChange('4k')}
+                        className={`rounded-md py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                          videoQuality === '4k'
+                            ? 'bg-white text-slate-900 shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        4K 60fps
+                      </button>
+                    </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1">
-                    <button
-                      type="button"
-                      onClick={() => onVideoQualityChange('1080p')}
-                      className={`rounded-md py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
-                        videoQuality === '1080p'
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      1080p 60fps
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onVideoQualityChange('4k')}
-                      className={`rounded-md py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
-                        videoQuality === '4k'
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      4K 60fps
-                    </button>
+
+                  <div>
+                    <div className="mb-1 flex items-center justify-between text-[11px] font-semibold text-slate-500">
+                      <span>Video Audio Track</span>
+                      <span className="text-[10px] text-slate-400">
+                        {soundBank.length > 0 && !masterAudioMuted
+                          ? 'SFX + Loop ready'
+                          : 'Silent until loaded'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1">
+                      <button
+                        type="button"
+                        onClick={() => onVideoAudioModeChange('baked')}
+                        className={`rounded-md py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                          videoAudioMode === 'baked'
+                            ? 'bg-white text-slate-900 shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        Baked Audio
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onVideoAudioModeChange('silent')}
+                        className={`rounded-md py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                          videoAudioMode === 'silent'
+                            ? 'bg-white text-slate-900 shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        Silent Video
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -1610,7 +2227,16 @@ export const EditorPanel = React.memo(function EditorPanel({
                   }}
                   className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-800 transition-colors hover:bg-slate-100 cursor-pointer"
                 >
-                  <span>MP4 Video (60 FPS)</span>
+                  <span>
+                    MP4 Video (60 FPS){' '}
+                    <span className="text-[10.5px] font-semibold text-slate-400">
+                      {videoAudioMode === 'baked' &&
+                      soundBank.length > 0 &&
+                      !masterAudioMuted
+                        ? '· + Audio'
+                        : '· Silent'}
+                    </span>
+                  </span>
                   <Download className="h-3.5 w-3.5 text-slate-400 shrink-0" />
                 </button>
                 <button
@@ -1622,7 +2248,16 @@ export const EditorPanel = React.memo(function EditorPanel({
                   }}
                   className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-800 transition-colors hover:bg-slate-100 cursor-pointer"
                 >
-                  <span>WebM Video (60 FPS)</span>
+                  <span>
+                    WebM Video (60 FPS){' '}
+                    <span className="text-[10.5px] font-semibold text-slate-400">
+                      {videoAudioMode === 'baked' &&
+                      soundBank.length > 0 &&
+                      !masterAudioMuted
+                        ? '· + Audio'
+                        : '· Silent'}
+                    </span>
+                  </span>
                   <Download className="h-3.5 w-3.5 text-slate-400 shrink-0" />
                 </button>
                 <button
@@ -1636,6 +2271,29 @@ export const EditorPanel = React.memo(function EditorPanel({
                 >
                   <span>Animated GIF (Smooth)</span>
                   <Download className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                </button>
+
+                <div className="my-1 border-t border-slate-100" />
+
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={isExportingWav || soundBank.length === 0}
+                  onClick={() => {
+                    setOpenMenu(null);
+                    onExportWavStem();
+                  }}
+                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs font-semibold text-slate-800 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45 cursor-pointer"
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    {isExportingWav ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-600" />
+                    ) : (
+                      <Zap className="h-3.5 w-3.5 text-emerald-600" />
+                    )}
+                    <span>Download WAV Audio Stem</span>
+                  </span>
+                  <span className="font-mono text-[10px] text-slate-400">.wav</span>
                 </button>
               </div>
             )}

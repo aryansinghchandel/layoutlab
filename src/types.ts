@@ -25,6 +25,14 @@ export interface MessageAttachment {
   dataUrl?: string;
 }
 
+export type VisualEffectType = 'none' | 'red_flash' | 'cut_to_black';
+export type MessageCueKind = 'typing' | 'visual_effect';
+
+export interface ActiveVisualEffect {
+  type: 'red_flash' | 'cut_to_black';
+  intensity: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: MessageRole;
@@ -37,6 +45,20 @@ export interface ChatMessage {
   customSenderIcon?: CustomAiIconId;
   customSenderAvatar?: string;
   systemAnimate?: boolean;
+  /** Optional cue mode for script-parsed typing holds or standalone visual effects */
+  cueKind?: MessageCueKind;
+  /** Explicit hold duration in seconds (e.g. [TYPING...] Hold 1.5 sec or Hard cut to black) */
+  holdDurationSec?: number;
+  /** Extra hold beat after this message (e.g. breathing room for a following GIF overlay) */
+  postHoldSec?: number;
+  /** Visual effect triggered by this line or cue */
+  visualEffect?: VisualEffectType;
+  /** Parsed [SFX: ...] cue label from script */
+  sfxCue?: string;
+  /** 'auto' (fuzzy match sfxCue), 'none', or a SoundBankFile.id */
+  sfxFileId?: string;
+  sfxMuted?: boolean;
+  sfxVolume?: number;
 }
 
 export interface ThinkingSenderInfo {
@@ -70,17 +92,65 @@ export interface StageOverlay {
   pillBg?: boolean;
   pillBgColor?: string;
   pillBgOpacity?: number;
-  /** Image overlay properties */
+  /** Image / GIF overlay properties */
   imageDataUrl?: string;
   imageName?: string;
   imageAspectRatio?: number;
   imageBorderRadius?: number;
+  /** Script-generated GIF placeholder metadata */
+  isGifPlaceholder?: boolean;
+  placeholderLabel?: string;
+  /** Optional SFX synced to overlay appearance */
+  sfxCue?: string;
+  sfxFileId?: string;
+  sfxMuted?: boolean;
+  sfxVolume?: number;
   /** Timing & transitions */
   timingMode: OverlayTimingMode;
   startSec: number;
   endSec: number;
   transition: OverlayTransition;
 }
+
+export interface SoundBankFile {
+  id: string;
+  name: string;
+  baseName: string;
+  normalized: string;
+  compact: string;
+  tokens: string[];
+  durationSec: number;
+  buffer: AudioBuffer;
+}
+
+export interface BackgroundLoopConfig {
+  enabled: boolean;
+  cueName: string;
+  /** 'auto' (fuzzy match cueName), 'none', or a SoundBankFile.id */
+  selectedFileId: string;
+  /** 0.0 to 1.0 (default 0.11 = 11%) */
+  volume: number;
+  muted: boolean;
+}
+
+export const DEFAULT_BACKGROUND_LOOP: BackgroundLoopConfig = {
+  enabled: false,
+  cueName: '',
+  selectedFileId: 'auto',
+  volume: 0.11,
+  muted: false,
+};
+
+export interface ScheduledAudioEvent {
+  id: string;
+  timeMs: number;
+  fileId: string;
+  volume: number;
+  maxDurationSec?: number;
+  sourceLabel?: string;
+}
+
+export type VideoAudioMode = 'baked' | 'silent';
 
 export const STAGE_LOGICAL_WIDTH = 960;
 export const STAGE_LOGICAL_HEIGHT = 540;

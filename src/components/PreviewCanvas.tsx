@@ -7,9 +7,11 @@ import {
   RotateCcw,
   Square,
   Type,
+  Upload,
   X,
 } from 'lucide-react';
 import {
+  type ActiveVisualEffect,
   type AiSkin,
   type ChatMessage,
   type CustomAiIconId,
@@ -17,6 +19,7 @@ import {
   type MessageAttachment,
   type MessageSenderSkin,
   type PreviewMode,
+  type SoundBankFile,
   STAGE_LOGICAL_HEIGHT,
   STAGE_LOGICAL_WIDTH,
   type StageOverlay,
@@ -104,9 +107,13 @@ interface PreviewCanvasProps {
   onSelectOverlay?: (id: string | null) => void;
   onAddTextOverlay?: () => void;
   onAddImageOverlayFile?: (file: File) => void;
+  onUploadOverlayImage?: (overlayId: string, file: File) => void;
   onUpdateOverlay?: (id: string, patch: Partial<StageOverlay>) => void;
   onDuplicateOverlay?: (id: string) => void;
   onDeleteOverlay?: (id: string) => void;
+  activeVisualEffect?: ActiveVisualEffect | null;
+  soundBank?: SoundBankFile[];
+  onAuditionSoundFile?: (fileId: string, volume?: number) => void;
 }
 
 const AssistantMessageContent = React.memo(function AssistantMessageContent({
@@ -942,9 +949,13 @@ export function PreviewCanvas({
   onSelectOverlay,
   onAddTextOverlay,
   onAddImageOverlayFile,
+  onUploadOverlayImage,
   onUpdateOverlay,
   onDuplicateOverlay,
   onDeleteOverlay,
+  activeVisualEffect = null,
+  soundBank = [],
+  onAuditionSoundFile,
 }: PreviewCanvasProps) {
   const isDark = theme === 'dark';
   const isClean16x9 = previewMode === 'clean16x9';
@@ -953,6 +964,8 @@ export function PreviewCanvas({
   const feedViewportRef = useRef<HTMLDivElement | null>(null);
   const feedStackRef = useRef<HTMLDivElement | null>(null);
   const stageImageInputRef = useRef<HTMLInputElement | null>(null);
+  const placeholderUploadRef = useRef<HTMLInputElement | null>(null);
+  const pendingUploadOverlayIdRef = useRef<string | null>(null);
   const inspectorTextRef = useRef<HTMLTextAreaElement | null>(null);
   const [overflowOffset, setOverflowOffset] = useState<number>(0);
   const [stageScale, setStageScale] = useState<number>(1);
@@ -1234,11 +1247,26 @@ export function PreviewCanvas({
                 <input
                   ref={stageImageInputRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/gif,image/*"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
                     e.target.value = '';
                     if (file) onAddImageOverlayFile?.(file);
+                  }}
+                  className="hidden"
+                />
+                <input
+                  ref={placeholderUploadRef}
+                  type="file"
+                  accept="image/gif,image/*"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    const targetId = pendingUploadOverlayIdRef.current;
+                    e.target.value = '';
+                    pendingUploadOverlayIdRef.current = null;
+                    if (file && targetId) {
+                      onUploadOverlayImage?.(targetId, file);
+                    }
                   }}
                   className="hidden"
                 />
@@ -2218,6 +2246,99 @@ export function PreviewCanvas({
                             }}
                           />
                         </div>
+                      ) : overlay.kind === 'image' && !overlay.imageDataUrl ? (
+                        isExporting ? null : (
+                          <div
+                            style={{
+                              width: '100%',
+                              height: '100%',
+                              borderRadius: `${imgRadiusPx}px`,
+                              border: `2px dashed ${
+                                isSelected
+                                  ? '#60a5fa'
+                                  : isDark
+                                    ? 'rgba(148, 163, 184, 0.55)'
+                                    : 'rgba(71, 85, 105, 0.55)'
+                              }`,
+                              backgroundColor: isDark
+                                ? 'rgba(15, 23, 42, 0.86)'
+                                : 'rgba(15, 23, 42, 0.82)',
+                              color: '#f8fafc',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: `${Math.max(4, 8 * s)}px`,
+                              padding: `${Math.max(6, 12 * s)}px`,
+                              boxSizing: 'border-box',
+                              textAlign: 'center',
+                              boxShadow: '0 8px 22px rgba(0, 0, 0, 0.28)',
+                            }}
+                          >
+                            <span
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                padding: `${Math.max(2, 3 * s)}px ${Math.max(6, 8 * s)}px`,
+                                borderRadius: '9999px',
+                                backgroundColor: 'rgba(59, 130, 246, 0.25)',
+                                border: '1px solid rgba(96, 165, 250, 0.5)',
+                                color: '#bfdbfe',
+                                fontSize: `${Math.max(9, 11 * s)}px`,
+                                fontWeight: 700,
+                                letterSpacing: '0.04em',
+                                lineHeight: 1,
+                              }}
+                            >
+                              GIF PLACEHOLDER
+                            </span>
+                            <span
+                              style={{
+                                fontSize: `${Math.max(10, 14 * s)}px`,
+                                fontWeight: 600,
+                                lineHeight: 1.25,
+                                maxWidth: '100%',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                display: '-webkit-box',
+                                WebkitLineClamp: 2,
+                                WebkitBoxOrient: 'vertical',
+                              }}
+                            >
+                              {overlay.placeholderLabel ||
+                                overlay.imageName ||
+                                'Reaction GIF'}
+                            </span>
+                            {canEditOverlays && onUploadOverlayImage && (
+                              <button
+                                type="button"
+                                onPointerDown={(e) => e.stopPropagation()}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  pendingUploadOverlayIdRef.current = overlay.id;
+                                  placeholderUploadRef.current?.click();
+                                }}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '5px',
+                                  marginTop: `${Math.max(2, 4 * s)}px`,
+                                  padding: `${Math.max(4, 6 * s)}px ${Math.max(8, 12 * s)}px`,
+                                  borderRadius: '8px',
+                                  backgroundColor: '#ffffff',
+                                  color: '#0f172a',
+                                  border: 'none',
+                                  fontSize: `${Math.max(10, 12 * s)}px`,
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                <Upload size={Math.max(11, Math.round(13 * s))} />
+                                <span>Upload GIF / Image</span>
+                              </button>
+                            )}
+                          </div>
+                        )
                       ) : (
                         <div
                           style={{
@@ -2382,6 +2503,32 @@ export function PreviewCanvas({
                 })}
               </div>
             )}
+
+            {/* Full-Frame Visual Effects Layer (red_flash & cut_to_black synced with Export) */}
+            {activeVisualEffect && activeVisualEffect.intensity > 0.005 && (
+              <div
+                aria-hidden="true"
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  zIndex: 40,
+                  pointerEvents: 'none',
+                  ...(activeVisualEffect.type === 'cut_to_black'
+                    ? {
+                        backgroundColor: '#000000',
+                        opacity: Math.max(0, Math.min(1, activeVisualEffect.intensity)),
+                      }
+                    : {
+                        backgroundColor: `rgba(220, 38, 38, ${(
+                          0.42 * activeVisualEffect.intensity
+                        ).toFixed(3)})`,
+                        backgroundImage: `radial-gradient(circle at center, rgba(239, 68, 68, 0) 28%, rgba(185, 28, 28, ${(
+                          0.68 * activeVisualEffect.intensity
+                        ).toFixed(3)}) 100%)`,
+                      }),
+                }}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -2464,6 +2611,8 @@ export function PreviewCanvas({
             overlay={selectedOverlay}
             totalDurationSec={totalDurationSec}
             textInputRef={inspectorTextRef}
+            soundBank={soundBank}
+            onAuditionSoundFile={onAuditionSoundFile}
             onUpdate={onUpdateOverlay}
             onDuplicate={onDuplicateOverlay}
             onDelete={onDeleteOverlay}
