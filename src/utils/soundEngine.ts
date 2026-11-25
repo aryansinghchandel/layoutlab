@@ -3,10 +3,15 @@ import type {
   ChatMessage,
   PreviewMode,
   ScheduledAudioEvent,
+  SfxPlaybackMode,
   SoundBankFile,
   StageOverlay,
 } from '../types';
-import type { AnimationTimeline, TimelineSegment } from './nativeCanvasRenderer';
+import {
+  type AnimationTimeline,
+  isThinkingDotsMessage,
+  type TimelineSegment,
+} from './nativeCanvasRenderer';
 
 const AUDIO_FILE_EXTENSIONS = /\.(mp3|wav|ogg|m4a|aac|flac|webm|opus)$/i;
 
@@ -324,6 +329,7 @@ export interface MasterAudioSchedule {
   events: ScheduledAudioEvent[];
   backgroundFile: SoundBankFile | null;
   backgroundVolume: number;
+  masterVolume: number;
   blackoutRangesMs: Array<{ startMs: number; endMs: number }>;
   typingWindowsMs: Array<{ startMs: number; endMs: number }>;
   totalDurationMs: number;
@@ -332,6 +338,44 @@ export interface MasterAudioSchedule {
 function isTypingSoundCue(cue: string | undefined): boolean {
   if (!cue) return false;
   return /\b(type|typing|keyboard|keystroke|keyclick|keys?|clack)\b/i.test(cue);
+}
+
+/**
+ * Resolves each message's non-typing SFX audio duration (in ms) so buildAnimationTimeline
+ * can enforce 'hold_until_done' (capped at 2.0s max) identically across Live Preview & Export.
+ */
+export function buildSfxDurationMap(
+  messages: ChatMessage[],
+  soundBank: SoundBankFile[]
+): Record<string, number> {
+  const map: Record<string, number> = {};
+  if (soundBank.length === 0) return map;
+
+  for (const msg of messages) {
+    if (msg.sfxMuted || msg.sfxFileId === 'none') continue;
+    if (isThinkingDotsMessage(msg)) continue;
+    const hasCueOrManual =
+      Boolean(msg.sfxCue?.trim()) ||
+      (Boolean(msg.sfxFileId) &&
+        msg.sfxFileId !== 'auto' &&
+        msg.sfxFileId !== 'none');
+    if (!hasCueOrManual) continue;
+
+    const file = resolveSfxFile(msg.sfxCue, msg.sfxFileId, soundBank);
+    if (!file) continue;
+
+    if (
+      msg.role === 'user' &&
+      !msg.cueKind &&
+      (isTypingSoundCue(msg.sfxCue) || isTypingSoundCue(file.normalized))
+    ) {
+      continue;
+    }
+
+    map[msg.id] = Math.round(file.durationSec * 1000);
+  }
+
+  return map;
 }
 
 function scheduleTypingSpan(params: {
@@ -419,6 +463,7 @@ export function buildMasterAudioSchedule(params: {
   soundBank: SoundBankFile[];
   backgroundLoop: BackgroundLoopConfig;
   masterMuted?: boolean;
+  masterVolume?: number;
 }): MasterAudioSchedule {
   const {
     timeline,
@@ -428,13 +473,17 @@ export function buildMasterAudioSchedule(params: {
     soundBank,
     backgroundLoop,
     masterMuted = false,
+    masterVolume = 1.0,
   } = params;
 
-  if (masterMuted) {
+  const clampedMasterVolume = Math.max(0, Math.min(1.5, masterVolume));
+
+  if (masterMuted || clampedMasterVolume <= 0) {
     return {
       events: [],
       backgroundFile: null,
       backgroundVolume: 0,
+      masterVolume: 0,
       blackoutRangesMs: [],
       typingWindowsMs: [],
       totalDurationMs: timeline.totalDurationMs,
@@ -459,6 +508,50 @@ export function buildMasterAudioSchedule(params: {
     }
   }
 
+  // Helper: locate the exact start timestamp of the next message/event after msgIdx
+  const findNextEventStartMs = (msgIdx: number, afterMs: number): number | null => {
+    for (const seg of timeline.segments) {
+      if (seg.kind === 'final_hold') continue;
+      if (seg.msgIndex > msgIdx && seg.startMs > afterMs + 25) {
+        return seg.startMs;
+      }
+    }
+    return null;
+  };
+
+  // Helper: attach Hold / Auto-Duck (120ms ramp) / Cut (20ms ramp) tail control to any one-shot SFX
+  const buildTailDucking = (
+    msg: ChatMessage,
+    msgIdx: number,
+    eventTimeMs: number,
+    file: SoundBankFile
+  ): Pick<ScheduledAudioEvent, 'maxDurationSec' | 'duckAtMs' | 'duckFadeMs' | 'sfxMode'> => {
+    const mode: SfxPlaybackMode = msg.sfxMode ?? 'hold_until_done';
+    const nextEventMs = findNextEventStartMs(msgIdx, eventTimeMs);
+    if (nextEventMs === null) {
+      return { sfxMode: mode };
+    }
+    const fileEndMs = eventTimeMs + file.durationSec * 1000;
+    if (mode === 'cut_on_next') {
+      const spanMs = Math.max(30, nextEventMs - eventTimeMs);
+      return {
+        sfxMode: mode,
+        maxDurationSec: spanMs / 1000,
+        duckAtMs: nextEventMs,
+        duckFadeMs: 20,
+      };
+    }
+    // Both 'hold_until_done' (for >2.0s tails) and 'duck_on_next' smoothly fade out over 120ms when the next event starts!
+    if (fileEndMs > nextEventMs + 15) {
+      return {
+        sfxMode: mode,
+        duckAtMs: nextEventMs,
+        duckFadeMs: 120,
+      };
+    }
+    return { sfxMode: mode };
+  };
+
   // 1. Per-line SFX + User Typing / [TYPING...] SFX from ChatMessage items
   messages.forEach((msg, idx) => {
     if (msg.sfxMuted) return;
@@ -466,11 +559,50 @@ export function buildMasterAudioSchedule(params: {
     const msgSegs = segsByMsg.get(idx) ?? [];
     if (msgSegs.length === 0) return;
 
-    // 1a. Explicit [TYPING...] (Hold X sec) cue
-    if (msg.cueKind === 'typing') {
+    // 1a. Explicit [TYPING...] (Hold X sec) or "ChatGPT: ..." thinking dots cue
+    if (isThinkingDotsMessage(msg)) {
       if (msg.sfxFileId === 'none') return;
       const seg = msgSegs.find((s) => s.kind === 'thinking') ?? msgSegs[0];
-      const assignedFile = resolveSfxFile(msg.sfxCue, msg.sfxFileId, soundBank);
+      const hasCueOrManual =
+        Boolean(msg.sfxCue?.trim()) ||
+        (Boolean(msg.sfxFileId) &&
+          msg.sfxFileId !== 'auto' &&
+          msg.sfxFileId !== 'none');
+      const assignedFile = hasCueOrManual
+        ? resolveSfxFile(msg.sfxCue, msg.sfxFileId, soundBank)
+        : null;
+      const isExplicitNonTypingSfx =
+        Boolean(assignedFile) &&
+        !isTypingSoundCue(msg.sfxCue) &&
+        !isTypingSoundCue(assignedFile?.normalized);
+
+      if (isExplicitNonTypingSfx && assignedFile) {
+        const offsetMs = Math.max(-1000, Math.min(1000, msg.sfxOffsetMs ?? 0));
+        const eventTimeMs = Math.max(
+          0,
+          Math.min(timeline.totalDurationMs, seg.startMs + offsetMs)
+        );
+        const tail = buildTailDucking(msg, idx, eventTimeMs, assignedFile);
+        events.push({
+          id: `ev-think-${msg.id}`,
+          timeMs: eventTimeMs,
+          fileId: assignedFile.id,
+          volume: Math.max(0, Math.min(1.5, msg.sfxVolume ?? 0.9)),
+          sourceLabel: msg.sfxCue || assignedFile.baseName,
+          ...tail,
+        });
+        return;
+      }
+
+      // Only play keyboard typing clicks for explicit [TYPING...] cues (or cues with a typing SFX tag),
+      // leaving silent "ChatGPT: ..." ellipsis thinking pauses clean unless an SFX was specified.
+      const shouldPlayTypingClicks =
+        isTypingSoundCue(msg.sfxCue) ||
+        (msg.cueKind === 'typing' &&
+          /typing/i.test(msg.content) &&
+          !msg.sfxCue?.trim());
+      if (!shouldPlayTypingClicks) return;
+
       const typingFile = assignedFile ?? fallbackTypingFile;
       scheduleTypingSpan({
         events,
@@ -527,24 +659,31 @@ export function buildMasterAudioSchedule(params: {
         });
       }
 
-      // Schedule non-typing send SFX (e.g. [SFX: iMessage Pop]) right when the message sends!
+      // Schedule non-typing send SFX (e.g. [SFX: iMessage Pop] or [SFX: FAAAH]) right when the message sends/completes!
       if (!lineIsTypingSfx && resolvedLineFile) {
         const slideSeg =
           msgSegs.find((s) => s.kind === 'user_slide') ??
           msgSegs.find((s) => s.kind === 'user_send_highlight') ??
           msgSegs[0];
+        const offsetMs = Math.max(-1000, Math.min(1000, msg.sfxOffsetMs ?? 0));
+        const eventTimeMs = Math.max(
+          0,
+          Math.min(timeline.totalDurationMs, slideSeg.startMs + offsetMs)
+        );
+        const tail = buildTailDucking(msg, idx, eventTimeMs, resolvedLineFile);
         events.push({
           id: `ev-msg-${msg.id}`,
-          timeMs: Math.max(0, Math.min(timeline.totalDurationMs, slideSeg.startMs)),
+          timeMs: eventTimeMs,
           fileId: resolvedLineFile.id,
           volume: Math.max(0, Math.min(1.5, msg.sfxVolume ?? 0.9)),
           sourceLabel: msg.sfxCue || resolvedLineFile.baseName,
+          ...tail,
         });
       }
       return;
     }
 
-    // 1c. Visual effects, system events, and assistant replies
+    // 1c. Visual effects, hold cues, system events, and assistant replies
     if (soundBank.length === 0) return;
 
     const hasCueOrManual =
@@ -566,23 +705,37 @@ export function buildMasterAudioSchedule(params: {
       triggerTimeMs = seg.startMs;
     } else if (msg.role === 'system') {
       const seg = msgSegs.find((s) => s.kind === 'system_enter') ?? msgSegs[0];
-      triggerTimeMs = seg.startMs;
+      const dur = Math.max(0, seg.endMs - seg.startMs);
+      triggerTimeMs =
+        msg.systemAnimate === false
+          ? seg.startMs
+          : Math.round(seg.startMs + dur * 0.95);
     } else {
-      // Assistant message: fire right when the reply begins appearing
-      const streamSeg =
-        msgSegs.find((s) => s.kind === 'ai_stream') ??
-        msgSegs.find((s) => s.kind === 'idle') ??
-        msgSegs[0];
-      triggerTimeMs = streamSeg.startMs;
+      // Assistant message: trigger SFX right as text finishes typing (96% streaming completion), never at the start
+      const streamSeg = msgSegs.find((s) => s.kind === 'ai_stream');
+      if (streamSeg) {
+        const streamDur = Math.max(0, streamSeg.endMs - streamSeg.startMs);
+        triggerTimeMs = Math.round(streamSeg.startMs + streamDur * 0.96);
+      } else {
+        const idleSeg = msgSegs.find((s) => s.kind === 'idle') ?? msgSegs[0];
+        triggerTimeMs = idleSeg.startMs;
+      }
     }
 
     if (triggerTimeMs !== null) {
+      const offsetMs = Math.max(-1000, Math.min(1000, msg.sfxOffsetMs ?? 0));
+      const eventTimeMs = Math.max(
+        0,
+        Math.min(timeline.totalDurationMs, triggerTimeMs + offsetMs)
+      );
+      const tail = buildTailDucking(msg, idx, eventTimeMs, file);
       events.push({
         id: `ev-msg-${msg.id}`,
-        timeMs: Math.max(0, Math.min(timeline.totalDurationMs, triggerTimeMs)),
+        timeMs: eventTimeMs,
         fileId: file.id,
         volume: Math.max(0, Math.min(1.5, msg.sfxVolume ?? 0.9)),
         sourceLabel: msg.sfxCue || file.baseName,
+        ...tail,
       });
     }
   });
@@ -640,6 +793,7 @@ export function buildMasterAudioSchedule(params: {
     events,
     backgroundFile,
     backgroundVolume,
+    masterVolume: clampedMasterVolume,
     blackoutRangesMs,
     typingWindowsMs,
     totalDurationMs: timeline.totalDurationMs,
@@ -651,7 +805,10 @@ export async function renderMasterAudioMixToBuffer(
   soundBank: SoundBankFile[],
   sampleRate = 48000
 ): Promise<AudioBuffer | null> {
-  if (schedule.events.length === 0 && !schedule.backgroundFile) {
+  if (
+    (schedule.events.length === 0 && !schedule.backgroundFile) ||
+    schedule.masterVolume <= 0
+  ) {
     return null;
   }
 
@@ -660,9 +817,9 @@ export async function renderMasterAudioMixToBuffer(
   const offline = new OfflineAudioContext(2, totalFrames, sampleRate);
   const fileMap = new Map(soundBank.map((f) => [f.id, f]));
 
-  // Subtle master safety limiter / compressor to prevent clipping when multiple SFX hit together
+  // Master Volume bus (0%–150%) + safety limiter / compressor matching LiveAudioEngine
   const masterBus = offline.createGain();
-  masterBus.gain.value = 1.0;
+  masterBus.gain.value = Math.max(0, Math.min(1.5, schedule.masterVolume));
   const compressor = offline.createDynamicsCompressor();
   compressor.threshold.value = -2;
   compressor.knee.value = 6;
@@ -747,7 +904,19 @@ export async function renderMasterAudioMixToBuffer(
       ? Math.min(ev.maxDurationSec, durationSec - startSec)
       : durationSec - startSec;
 
-    if (ev.maxDurationSec && (effectiveBufferDur > maxClipDur || ev.isTyping)) {
+    if (ev.duckAtMs !== undefined && !ev.isTyping) {
+      const fadeDurSec = Math.max(0.015, (ev.duckFadeMs ?? 120) / 1000);
+      const duckStartSec = Math.max(startSec + 0.015, ev.duckAtMs / 1000);
+      const fadeEndSec = Math.min(durationSec, duckStartSec + fadeDurSec);
+      const totalPlayDur = Math.min(effectiveBufferDur, fadeEndSec - startSec);
+      if (totalPlayDur > 0.015) {
+        if (duckStartSec < startSec + effectiveBufferDur) {
+          gain.gain.setValueAtTime(ev.volume, duckStartSec);
+          gain.gain.linearRampToValueAtTime(0.0001, fadeEndSec);
+        }
+        src.start(startSec, 0, Math.max(0.015, (totalPlayDur + 0.01) * rate));
+      }
+    } else if (ev.maxDurationSec && (effectiveBufferDur > maxClipDur || ev.isTyping)) {
       const clampedDur = Math.max(0.015, Math.min(effectiveBufferDur, maxClipDur));
       const fadeLen = ev.isTyping
         ? Math.min(0.015, clampedDur * 0.35)
@@ -823,6 +992,9 @@ export function encodeAudioBufferToWavBlob(buffer: AudioBuffer): Blob {
  */
 export class LiveAudioEngine {
   private ctx: AudioContext | null = null;
+  private masterBus: GainNode | null = null;
+  private compressor: DynamicsCompressorNode | null = null;
+  private masterVolume = 1.0;
   private activeSources = new Set<AudioBufferSourceNode>();
   private activeTypingSources = new Set<AudioBufferSourceNode>();
   private bgSource: AudioBufferSourceNode | null = null;
@@ -843,6 +1015,36 @@ export class LiveAudioEngine {
     return this.ctx;
   }
 
+  private ensureMasterBus(ctx: AudioContext): GainNode {
+    if (!this.masterBus || !this.compressor) {
+      const bus = ctx.createGain();
+      bus.gain.value = this.masterVolume;
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -2;
+      comp.knee.value = 6;
+      comp.ratio.value = 8;
+      comp.attack.value = 0.002;
+      comp.release.value = 0.1;
+      bus.connect(comp);
+      comp.connect(ctx.destination);
+      this.masterBus = bus;
+      this.compressor = comp;
+    }
+    return this.masterBus;
+  }
+
+  setMasterVolume(volume: number): void {
+    const clamped = Math.max(0, Math.min(1.5, volume));
+    this.masterVolume = clamped;
+    if (this.masterBus && this.ctx) {
+      try {
+        this.masterBus.gain.setTargetAtTime(clamped, this.ctx.currentTime, 0.015);
+      } catch {
+        this.masterBus.gain.value = clamped;
+      }
+    }
+  }
+
   getSynthKeyclickBuffer(): AudioBuffer {
     return getSynthKeyclickBuffer(this.ensureContext());
   }
@@ -850,6 +1052,7 @@ export class LiveAudioEngine {
   unlock(): void {
     try {
       const ctx = this.ensureContext();
+      this.ensureMasterBus(ctx);
       if (ctx.state === 'suspended') {
         void ctx.resume();
       }
@@ -869,6 +1072,7 @@ export class LiveAudioEngine {
       if (ctx.state === 'suspended') {
         void ctx.resume();
       }
+      const masterBus = this.ensureMasterBus(ctx);
       const src = ctx.createBufferSource();
       src.buffer = buffer;
       src.loop = true;
@@ -881,7 +1085,7 @@ export class LiveAudioEngine {
       gain.gain.linearRampToValueAtTime(clampedVol, now + 0.06);
 
       src.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(masterBus);
 
       const safeOffset =
         buffer.duration > 0.05 ? startOffsetSec % buffer.duration : 0;
@@ -944,6 +1148,8 @@ export class LiveAudioEngine {
     options?: {
       delaySec?: number;
       maxDurationSec?: number;
+      duckAfterSec?: number;
+      duckFadeSec?: number;
       pitchRate?: number;
       isTyping?: boolean;
     }
@@ -953,6 +1159,7 @@ export class LiveAudioEngine {
       if (ctx.state === 'suspended') {
         void ctx.resume();
       }
+      const masterBus = this.ensureMasterBus(ctx);
       const src = ctx.createBufferSource();
       src.buffer = buffer;
 
@@ -968,7 +1175,7 @@ export class LiveAudioEngine {
       gain.gain.setValueAtTime(clampedVol, startTime);
 
       src.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(masterBus);
 
       this.activeSources.add(src);
       if (options?.isTyping) {
@@ -987,7 +1194,17 @@ export class LiveAudioEngine {
 
       const maxDur = options?.maxDurationSec;
       const effectiveDur = buffer.duration / rate;
-      if (maxDur && maxDur > 0 && (effectiveDur > maxDur || options?.isTyping)) {
+      if (options?.duckAfterSec !== undefined && !options?.isTyping) {
+        const duckStart = startTime + Math.max(0.015, options.duckAfterSec);
+        const fadeSec = Math.max(0.015, options.duckFadeSec ?? 0.12);
+        const fadeEnd = duckStart + fadeSec;
+        const totalDur = Math.min(effectiveDur, fadeEnd - startTime);
+        if (options.duckAfterSec < effectiveDur) {
+          gain.gain.setValueAtTime(clampedVol, duckStart);
+          gain.gain.linearRampToValueAtTime(0.0001, fadeEnd);
+        }
+        src.start(startTime, 0, Math.max(0.015, (totalDur + 0.01) * rate));
+      } else if (maxDur && maxDur > 0 && (effectiveDur > maxDur || options?.isTyping)) {
         const clampedDur = Math.max(0.015, Math.min(effectiveDur, maxDur));
         const fadeLen = options?.isTyping
           ? Math.min(0.015, clampedDur * 0.35)
@@ -1033,6 +1250,22 @@ export class LiveAudioEngine {
 
   dispose(): void {
     this.stopAll();
+    if (this.masterBus) {
+      try {
+        this.masterBus.disconnect();
+      } catch {
+        // Ignore
+      }
+      this.masterBus = null;
+    }
+    if (this.compressor) {
+      try {
+        this.compressor.disconnect();
+      } catch {
+        // Ignore
+      }
+      this.compressor = null;
+    }
     if (this.ctx) {
       try {
         if (this.ctx.state !== 'closed') {

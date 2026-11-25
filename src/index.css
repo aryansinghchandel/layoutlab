@@ -369,18 +369,39 @@
   margin-left: 6px;
 }
 
+@keyframes chatgpt-thinking-bounce {
+  0%, 100% {
+    opacity: 0.3;
+    transform: translateY(0px) scale(0.84);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-3px) scale(1);
+  }
+}
+
+.chatgpt-thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.chatgpt-thinking-dots.clean16x9-dots {
+  gap: 7px;
+}
+
 .chatgpt-thinking-dot {
   display: inline-block;
-  width: 11px;
-  height: 11px;
+  width: 8px;
+  height: 8px;
   border-radius: 9999px;
   background-color: currentColor;
-  animation: chatgpt-dot-pulse 1s ease-in-out infinite;
+  animation: chatgpt-thinking-bounce 0.9s ease-in-out infinite;
 }
 
 .chatgpt-thinking-dot.clean16x9-dot {
-  width: 14px;
-  height: 14px;
+  width: 11px;
+  height: 11px;
 }
 
 .chatgpt-user-bubble-enter {

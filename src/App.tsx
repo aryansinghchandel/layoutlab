@@ -27,10 +27,12 @@ import { HomePage } from './components/HomePage';
 import { PreviewCanvas } from './components/PreviewCanvas';
 import { ScriptAutoBuildModal } from './components/ScriptAutoBuildModal';
 import {
+  type ActiveEmojiBurst,
   type ActiveVisualEffect,
   type AiSkin,
   type AnimationFormat,
   type BackgroundLoopConfig,
+  type CameraTransform,
   type ChatMessage,
   DEFAULT_BACKGROUND_LOOP,
   type DeviceMode,
@@ -57,7 +59,10 @@ import {
   exportAudioStemWav,
   startNativeAnimationExport,
 } from './utils/exportVideo';
-import { buildAnimationTimeline } from './utils/nativeCanvasRenderer';
+import {
+  buildAnimationTimeline,
+  isThinkingDotsMessage,
+} from './utils/nativeCanvasRenderer';
 import {
   createDefaultTextOverlay,
   createImageOverlayFromFile,
@@ -67,6 +72,7 @@ import { autoBuildFromScript } from './utils/scriptParser';
 import { AI_SKINS } from './utils/skins';
 import {
   buildMasterAudioSchedule,
+  buildSfxDurationMap,
   decodeSoundBankFiles,
   LiveAudioEngine,
   SYNTH_KEYCLICK_ID,
@@ -139,6 +145,10 @@ export default function App() {
   const [backgroundLoop, setBackgroundLoop] = useState<BackgroundLoopConfig>(
     DEFAULT_BACKGROUND_LOOP
   );
+  const [masterAudioVolume, setMasterAudioVolume] = useState<number>(1.0);
+  const [readingPacing, setReadingPacing] = useState<number>(1.0);
+  const [autoCameraMotion, setAutoCameraMotion] = useState<boolean>(true);
+  const [emojiBurstEnabled, setEmojiBurstEnabled] = useState<boolean>(true);
 
   // Live typing & streaming playback state
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -149,6 +159,10 @@ export default function App() {
     useState<ThinkingSenderInfo | null>(null);
   const [activeVisualEffect, setActiveVisualEffect] =
     useState<ActiveVisualEffect | null>(null);
+  const [cameraTransform, setCameraTransform] =
+    useState<CameraTransform | null>(null);
+  const [activeEmojiBurst, setActiveEmojiBurst] =
+    useState<ActiveEmojiBurst | null>(null);
   const [playbackTimeSec, setPlaybackTimeSec] = useState<number>(0);
   const [scrubTimeSec, setScrubTimeSec] = useState<number | null>(null);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
@@ -176,6 +190,10 @@ export default function App() {
   const soundBankRef = useRef<SoundBankFile[]>(soundBank);
   const backgroundLoopRef = useRef<BackgroundLoopConfig>(backgroundLoop);
   const masterAudioMutedRef = useRef<boolean>(masterAudioMuted);
+  const masterAudioVolumeRef = useRef<number>(masterAudioVolume);
+  const readingPacingRef = useRef<number>(readingPacing);
+  const autoCameraMotionRef = useRef<boolean>(autoCameraMotion);
+  const emojiBurstEnabledRef = useRef<boolean>(emojiBurstEnabled);
   const liveAudioRef = useRef<LiveAudioEngine | null>(null);
   const animationExportRef = useRef<AnimationExportController | null>(null);
 
@@ -187,23 +205,55 @@ export default function App() {
   }, []);
 
   const staticDisplayMessages = useMemo(
-    () => messages.filter((m) => !m.cueKind),
+    () => messages.filter((m) => !m.cueKind && !isThinkingDotsMessage(m)),
     [messages]
   );
 
   const totalDurationSec = useMemo(() => {
     if (messages.length === 0) return 6;
+    const sfxDurationsMs = buildSfxDurationMap(messages, soundBank);
     const tl = buildAnimationTimeline(messages, playbackSpeed, showBottomBar, {
       includeFinalHold: true,
+      readingPacing,
+      autoCameraMotion,
+      emojiBurstEnabled,
+      sfxDurationsMs,
     });
     return Math.max(1, tl.totalDurationMs / 1000);
-  }, [messages, playbackSpeed, showBottomBar]);
+  }, [
+    messages,
+    soundBank,
+    playbackSpeed,
+    showBottomBar,
+    readingPacing,
+    autoCameraMotion,
+    emojiBurstEnabled,
+  ]);
 
   const totalDurationSecRef = useRef<number>(totalDurationSec);
 
   useEffect(() => {
     speedRef.current = playbackSpeed;
   }, [playbackSpeed]);
+
+  useEffect(() => {
+    masterAudioVolumeRef.current = masterAudioVolume;
+    liveAudioRef.current?.setMasterVolume(
+      masterAudioMutedRef.current ? 0 : masterAudioVolume
+    );
+  }, [masterAudioVolume]);
+
+  useEffect(() => {
+    readingPacingRef.current = readingPacing;
+  }, [readingPacing]);
+
+  useEffect(() => {
+    autoCameraMotionRef.current = autoCameraMotion;
+  }, [autoCameraMotion]);
+
+  useEffect(() => {
+    emojiBurstEnabledRef.current = emojiBurstEnabled;
+  }, [emojiBurstEnabled]);
 
   useEffect(() => {
     showBottomBarRef.current = showBottomBar;
@@ -284,6 +334,8 @@ export default function App() {
     setIsThinking(false);
     setThinkingSender(null);
     setActiveVisualEffect(null);
+    setCameraTransform(null);
+    setActiveEmojiBurst(null);
     setPlaybackTimeSec(0);
     setScrubTimeSec(null);
     setStreamingMessageId(null);
@@ -394,11 +446,19 @@ export default function App() {
 
       const initialSpeed = speedRef.current;
       const initialMultiplier = getEffectivePlaybackMultiplier(initialSpeed);
+      const currentSoundBank = soundBankRef.current;
+      const sfxDurationsMs = buildSfxDurationMap(scriptSnapshot, currentSoundBank);
       const timeline = buildAnimationTimeline(
         scriptSnapshot,
         initialSpeed,
         showBottomBarRef.current,
-        { includeFinalHold: true }
+        {
+          includeFinalHold: true,
+          readingPacing: readingPacingRef.current,
+          autoCameraMotion: autoCameraMotionRef.current,
+          emojiBurstEnabled: emojiBurstEnabledRef.current,
+          sfxDurationsMs,
+        }
       );
 
       const clampedStartMs = Math.max(
@@ -407,7 +467,6 @@ export default function App() {
       );
 
       // Build synced Web Audio schedule (Background Loop + per-line SFX + timed overlay SFX)
-      const currentSoundBank = soundBankRef.current;
       const audioSchedule = buildMasterAudioSchedule({
         timeline,
         messages: scriptSnapshot,
@@ -416,6 +475,7 @@ export default function App() {
         soundBank: currentSoundBank,
         backgroundLoop: backgroundLoopRef.current,
         masterMuted: false, // live masterAudioMutedRef is checked dynamically
+        masterVolume: Math.max(0.01, masterAudioVolumeRef.current),
       });
       const audioFileMap = new Map(currentSoundBank.map((f) => [f.id, f]));
       let liveAudio: LiveAudioEngine | null = null;
@@ -426,6 +486,9 @@ export default function App() {
         liveAudio = getLiveAudioEngine();
         liveAudio.stopAll();
         liveAudio.unlock();
+        liveAudio.setMasterVolume(
+          masterAudioMutedRef.current ? 0 : masterAudioVolumeRef.current
+        );
         if (audioSchedule.backgroundFile) {
           const initialBgVol =
             masterAudioMutedRef.current || backgroundLoopRef.current.muted
@@ -457,6 +520,8 @@ export default function App() {
       setIsThinking(false);
       setThinkingSender(null);
       setActiveVisualEffect(null);
+      setCameraTransform(null);
+      setActiveEmojiBurst(null);
       setPlaybackTimeSec(clampedStartMs / 1000);
       setStreamingMessageId(null);
       setComposerDraft('');
@@ -467,6 +532,8 @@ export default function App() {
       let accumulatedMs = clampedStartMs;
       let lastSignature = '';
       let lastVfxSig = '';
+      let lastCamSig = '';
+      let lastBurstSig = '';
       let prevRenderedMessages: ChatMessage[] = [];
 
       const tick = (now: number) => {
@@ -526,9 +593,19 @@ export default function App() {
                 const maxDurationSec = ev.maxDurationSec
                   ? Math.max(0.015, ev.maxDurationSec / safeSpeedScale)
                   : undefined;
+                const duckAfterSec =
+                  ev.duckAtMs !== undefined
+                    ? Math.max(
+                        0.015,
+                        (ev.duckAtMs - ev.timeMs) / (1000 * safeSpeedScale)
+                      )
+                    : undefined;
+                const duckFadeSec = (ev.duckFadeMs ?? 120) / 1000;
                 liveAudio.playOneShot(buffer, ev.volume, {
                   delaySec,
                   maxDurationSec,
+                  duckAfterSec,
+                  duckFadeSec,
                   pitchRate: ev.pitchRate,
                   isTyping: ev.isTyping,
                 });
@@ -562,6 +639,30 @@ export default function App() {
         if (vfxSig !== lastVfxSig) {
           lastVfxSig = vfxSig;
           setActiveVisualEffect(frame.activeVisualEffect);
+        }
+
+        const cam = frame.cameraTransform;
+        const camSig = `${Math.round(cam.scale * 1000)}:${Math.round(
+          cam.offsetX * 10
+        )}:${Math.round(cam.offsetY * 10)}:${Math.round(
+          cam.originX * 1000
+        )}:${Math.round(cam.originY * 1000)}`;
+        if (camSig !== lastCamSig) {
+          lastCamSig = camSig;
+          setCameraTransform(cam);
+        }
+
+        const burst = frame.activeEmojiBurst;
+        const burstSig = burst
+          ? `${burst.id}:${Math.round(burst.opacity * 100)}:${Math.round(
+              burst.scale * 100
+            )}:${Math.round(burst.offsetY * 10)}:${Math.round(
+              burst.rotationDeg * 10
+            )}`
+          : '';
+        if (burstSig !== lastBurstSig) {
+          lastBurstSig = burstSig;
+          setActiveEmojiBurst(burst);
         }
 
         const lastMsg = frame.messages[frame.messages.length - 1];
@@ -633,6 +734,8 @@ export default function App() {
           setIsThinking(false);
           setThinkingSender(null);
           setActiveVisualEffect(null);
+          setCameraTransform(null);
+          setActiveEmojiBurst(null);
           setPlaybackTimeSec(0);
           setStreamingMessageId(null);
           setComposerDraft('');
@@ -680,6 +783,8 @@ export default function App() {
         setIsThinking(false);
         setThinkingSender(null);
         setActiveVisualEffect(null);
+        setCameraTransform(null);
+        setActiveEmojiBurst(null);
         setStreamingMessageId(null);
         setComposerDraft('');
         setSendHighlighted(false);
@@ -687,11 +792,21 @@ export default function App() {
       }
 
       const clampedSec = Math.max(0, Math.min(totalDurationSecRef.current, sec));
+      const sfxDurationsMs = buildSfxDurationMap(
+        messagesRef.current,
+        soundBankRef.current
+      );
       const timeline = buildAnimationTimeline(
         messagesRef.current,
         speedRef.current,
         showBottomBarRef.current,
-        { includeFinalHold: true }
+        {
+          includeFinalHold: true,
+          readingPacing: readingPacingRef.current,
+          autoCameraMotion: autoCameraMotionRef.current,
+          emojiBurstEnabled: emojiBurstEnabledRef.current,
+          sfxDurationsMs,
+        }
       );
       const frame = timeline.evaluateAt(clampedSec * 1000);
       let nextStreamingId: string | null = null;
@@ -721,6 +836,8 @@ export default function App() {
       setIsThinking(frame.isThinking);
       setThinkingSender(frame.thinkingSender);
       setActiveVisualEffect(frame.activeVisualEffect);
+      setCameraTransform(frame.cameraTransform);
+      setActiveEmojiBurst(frame.activeEmojiBurst);
       setStreamingMessageId(nextStreamingId);
       setComposerDraft(frame.composerDraft);
       setSendHighlighted(frame.sendHighlighted);
@@ -892,6 +1009,9 @@ export default function App() {
     setMasterAudioMuted((prev) => {
       const nextMuted = !prev;
       if (liveAudioRef.current) {
+        liveAudioRef.current.setMasterVolume(
+          nextMuted ? 0 : masterAudioVolumeRef.current
+        );
         if (nextMuted) {
           liveAudioRef.current.setBackgroundLoopGain(0);
           liveAudioRef.current.stopTypingSources();
@@ -906,6 +1026,18 @@ export default function App() {
       }
       return nextMuted;
     });
+  }, []);
+
+  const handleMasterAudioVolumeChange = useCallback((volume: number) => {
+    const clamped = Math.max(0, Math.min(1.5, Number(volume.toFixed(2))));
+    setMasterAudioVolume(clamped);
+    if (liveAudioRef.current && !masterAudioMutedRef.current) {
+      liveAudioRef.current.setMasterVolume(clamped);
+    }
+  }, []);
+
+  const handleToggleAutoCameraMotion = useCallback(() => {
+    setAutoCameraMotion((prev) => !prev);
   }, []);
 
   const handleUpdateBackgroundLoop = useCallback(
@@ -931,6 +1063,9 @@ export default function App() {
       if (!file) return;
       const engine = getLiveAudioEngine();
       engine.unlock();
+      engine.setMasterVolume(
+        masterAudioMutedRef.current ? 0 : masterAudioVolumeRef.current
+      );
       engine.playOneShot(file.buffer, volume, { maxDurationSec: 3.5 });
     },
     [getLiveAudioEngine]
@@ -944,6 +1079,7 @@ export default function App() {
         showBottomBar: showBottomBarRef.current,
         soundBank: soundBankRef.current,
         currentSkin: skinRef.current,
+        readingPacing: readingPacingRef.current,
       });
 
       setMessages(built.messages);
@@ -952,6 +1088,8 @@ export default function App() {
       setSelectedOverlayId(null);
       setScrubTimeSec(null);
       setActiveVisualEffect(null);
+      setCameraTransform(null);
+      setActiveEmojiBurst(null);
       setExportError(null);
 
       if (built.recommendedSkin !== skinRef.current) {
@@ -1228,12 +1366,16 @@ export default function App() {
           overlays: overlaysRef.current.map((o) => ({ ...o })),
         },
         speed: playbackSpeed,
+        readingPacing: readingPacingRef.current,
+        autoCameraMotion: autoCameraMotionRef.current,
+        emojiBurstEnabled: emojiBurstEnabledRef.current,
         quality: effectiveQuality,
         format,
         audioMode: videoAudioMode,
         soundBank: soundBankRef.current,
         backgroundLoop: backgroundLoopRef.current,
         masterAudioMuted: masterAudioMutedRef.current,
+        masterAudioVolume: masterAudioVolumeRef.current,
         onProgress: ({ percent, currentFrame, totalFrames }) => {
           setExportProgress(percent);
           setExportFrame(currentFrame);
@@ -1304,9 +1446,13 @@ export default function App() {
           overlays: overlaysRef.current.map((o) => ({ ...o })),
         },
         speed: playbackSpeed,
+        readingPacing: readingPacingRef.current,
+        autoCameraMotion: autoCameraMotionRef.current,
+        emojiBurstEnabled: emojiBurstEnabledRef.current,
         soundBank: soundBankRef.current,
         backgroundLoop: backgroundLoopRef.current,
         masterMuted: masterAudioMutedRef.current,
+        masterVolume: masterAudioVolumeRef.current,
       });
     } catch (err) {
       const message =
@@ -1522,9 +1668,17 @@ export default function App() {
             onClearSoundBank={handleClearSoundBank}
             masterAudioMuted={masterAudioMuted}
             onToggleMasterAudioMute={handleToggleMasterAudioMute}
+            masterAudioVolume={masterAudioVolume}
+            onMasterAudioVolumeChange={handleMasterAudioVolumeChange}
             backgroundLoop={backgroundLoop}
             onUpdateBackgroundLoop={handleUpdateBackgroundLoop}
             onAuditionSoundFile={handleAuditionSoundFile}
+            readingPacing={readingPacing}
+            onReadingPacingChange={setReadingPacing}
+            autoCameraMotion={autoCameraMotion}
+            onToggleAutoCameraMotion={handleToggleAutoCameraMotion}
+            emojiBurstEnabled={emojiBurstEnabled}
+            onToggleEmojiBurst={() => setEmojiBurstEnabled((v) => !v)}
             overlays={overlays}
             selectedOverlayId={selectedOverlayId}
             onSelectOverlay={setSelectedOverlayId}
@@ -1600,6 +1754,8 @@ export default function App() {
           onDuplicateOverlay={handleDuplicateOverlay}
           onDeleteOverlay={handleDeleteOverlay}
           activeVisualEffect={activeVisualEffect}
+          cameraTransform={cameraTransform}
+          activeEmojiBurst={activeEmojiBurst}
           soundBank={soundBank}
           onAuditionSoundFile={handleAuditionSoundFile}
         />

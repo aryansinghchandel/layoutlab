@@ -52,6 +52,7 @@ import {
   PLAYBACK_SPEEDS,
   type PlaybackSpeed,
   type PreviewMode,
+  type SfxPlaybackMode,
   type SoundBankFile,
   type StageOverlay,
   type ThemeMode,
@@ -129,9 +130,17 @@ interface EditorPanelProps {
   onClearSoundBank: () => void;
   masterAudioMuted: boolean;
   onToggleMasterAudioMute: () => void;
+  masterAudioVolume: number;
+  onMasterAudioVolumeChange: (volume: number) => void;
   backgroundLoop: BackgroundLoopConfig;
   onUpdateBackgroundLoop: (patch: Partial<BackgroundLoopConfig>) => void;
   onAuditionSoundFile: (fileId: string, volume?: number) => void;
+  readingPacing: number;
+  onReadingPacingChange: (pacing: number) => void;
+  autoCameraMotion: boolean;
+  onToggleAutoCameraMotion: () => void;
+  emojiBurstEnabled: boolean;
+  onToggleEmojiBurst: () => void;
   overlays: StageOverlay[];
   selectedOverlayId: string | null;
   onSelectOverlay: (id: string | null) => void;
@@ -279,9 +288,17 @@ export const EditorPanel = React.memo(function EditorPanel({
   onClearSoundBank,
   masterAudioMuted,
   onToggleMasterAudioMute,
+  masterAudioVolume,
+  onMasterAudioVolumeChange,
   backgroundLoop,
   onUpdateBackgroundLoop,
   onAuditionSoundFile,
+  readingPacing,
+  onReadingPacingChange,
+  autoCameraMotion,
+  onToggleAutoCameraMotion,
+  emojiBurstEnabled,
+  onToggleEmojiBurst,
   overlays,
   selectedOverlayId,
   onSelectOverlay,
@@ -1141,6 +1158,130 @@ export const EditorPanel = React.memo(function EditorPanel({
               </span>
             </div>
           </div>
+
+          {/* Master Volume (0%–150%), Reading Hold Pacing & Auto-Camera Motion */}
+          <div className="space-y-2.5 rounded-xl border border-slate-200 bg-slate-50/75 p-2.5">
+            {/* Master Export & Preview Volume */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold text-slate-700">
+                  Master Volume
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onMasterAudioVolumeChange(1.0)}
+                  title="Click to reset to 100%"
+                  className="font-mono text-[10.5px] font-semibold text-slate-700 hover:text-slate-950 tabular-nums cursor-pointer"
+                >
+                  {Math.round(masterAudioVolume * 100)}%
+                </button>
+              </div>
+              <input
+                type="range"
+                aria-label="Master Volume"
+                min={0}
+                max={150}
+                step={5}
+                value={Math.round(masterAudioVolume * 100)}
+                onChange={(e) =>
+                  onMasterAudioVolumeChange(Number(e.target.value) / 100)
+                }
+                className="h-1.5 w-full accent-slate-900 cursor-pointer"
+              />
+            </div>
+
+            <hr className="border-slate-200/80" />
+
+            {/* Reading Hold Multiplier */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold text-slate-700">
+                  Reading Hold Multiplier
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onReadingPacingChange(1.0)}
+                  title="Click to reset to 1.0x"
+                  className="font-mono text-[10.5px] font-semibold text-slate-700 hover:text-slate-950 tabular-nums cursor-pointer"
+                >
+                  {readingPacing.toFixed(1)}x{' '}
+                  <span className="font-normal text-slate-400">
+                    ({(1.8 * readingPacing).toFixed(1)}–{(2.4 * readingPacing).toFixed(1)}s)
+                  </span>
+                </button>
+              </div>
+              <input
+                type="range"
+                aria-label="Reading Hold Multiplier"
+                min={0.5}
+                max={2.0}
+                step={0.1}
+                value={readingPacing}
+                onChange={(e) => onReadingPacingChange(Number(e.target.value))}
+                className="h-1.5 w-full accent-slate-900 cursor-pointer"
+              />
+            </div>
+
+            <hr className="border-slate-200/80" />
+
+            {/* Auto-Camera Motion Toggle (Directional Focal Zoom + Crimson Alert Shake) */}
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-slate-800">
+                  Auto-Camera Motion
+                </div>
+                <div className="text-[10px] leading-tight text-slate-500">
+                  Focal zoom (1.12–1.16x) &amp; crimson shake
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoCameraMotion}
+                aria-label="Auto-Camera Motion"
+                onClick={onToggleAutoCameraMotion}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
+                  autoCameraMotion ? 'bg-slate-900' : 'bg-slate-300'
+                }`}
+              >
+                <span
+                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                    autoCameraMotion ? 'translate-x-4.5' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <hr className="border-slate-200/80" />
+
+            {/* Emoji Burst Pop-Ups Toggle */}
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-slate-800">
+                  Emoji Burst Pop-Ups
+                </div>
+                <div className="text-[10px] leading-tight text-slate-500">
+                  Pop-up reaction emoji on dramatic replies
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={emojiBurstEnabled}
+                aria-label="Emoji Burst Pop-Ups"
+                onClick={onToggleEmojiBurst}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
+                  emojiBurstEnabled ? 'bg-slate-900' : 'bg-slate-300'
+                }`}
+              >
+                <span
+                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                    emojiBurstEnabled ? 'translate-x-4.5' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
         </section>
 
         <hr className="border-slate-200" />
@@ -1841,110 +1982,233 @@ export const EditorPanel = React.memo(function EditorPanel({
                       />
                     )}
 
-                    {/* Per-Line SFX Override / Mute Badge & Optional Visual Effect Bar */}
+                    {/* Per-Line SFX Override / Time-Shift / Mute Badge & Optional Visual Effect Bar */}
                     {(msg.sfxCue ||
                       soundBank.length > 0 ||
-                      (msg.visualEffect && msg.visualEffect !== 'none')) && (
-                      <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-2">
-                        {msg.sfxCue && (
-                          <span
-                            title={`Parsed SFX tag: ${msg.sfxCue}`}
-                            className={`inline-flex max-w-[130px] items-center gap-1 truncate rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
-                              resolvedLineSfx && !msg.sfxMuted
-                                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                                : 'border-amber-200 bg-amber-50 text-amber-800'
-                            }`}
-                          >
-                            <Volume2 className="h-2.5 w-2.5 shrink-0" />
-                            <span className="truncate">{msg.sfxCue}</span>
-                          </span>
-                        )}
-
-                        <select
-                          aria-label="Line sound effect"
-                          value={msg.sfxFileId ?? 'auto'}
-                          onChange={(e) =>
-                            onUpdateMessageMeta(msg.id, {
-                              sfxFileId: e.target.value,
-                            })
-                          }
-                          className="h-6 min-w-0 flex-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 text-[10.5px] font-medium text-slate-700 outline-none focus:border-slate-400 focus:bg-white"
-                        >
-                          <option value="auto">
-                            {autoMatchedLineSfx
-                              ? `Auto: ${autoMatchedLineSfx.baseName}`
-                              : msg.sfxCue
-                                ? 'Auto (Load Sound Bank)'
-                                : 'SFX: None'}
-                          </option>
-                          <option value="none">No SFX</option>
-                          {soundBank.map((file) => (
-                            <option key={file.id} value={file.id}>
-                              {file.name}
-                            </option>
-                          ))}
-                        </select>
-
-                        {resolvedLineSfx && (
-                          <button
-                            type="button"
-                            disabled={Boolean(msg.sfxMuted)}
-                            onClick={() =>
-                              onAuditionSoundFile(
-                                resolvedLineSfx.id,
-                                msg.sfxVolume ?? 0.9
-                              )
-                            }
-                            title={`Preview ${resolvedLineSfx.name}`}
-                            aria-label="Preview line SFX"
-                            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-40 cursor-pointer"
-                          >
-                            <Play className="h-2.5 w-2.5 fill-current" />
-                          </button>
-                        )}
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onUpdateMessageMeta(msg.id, {
-                              sfxMuted: !msg.sfxMuted,
-                            })
-                          }
-                          title={msg.sfxMuted ? 'Unmute line SFX' : 'Mute line SFX'}
-                          aria-label={msg.sfxMuted ? 'Unmute line SFX' : 'Mute line SFX'}
-                          className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border transition-colors cursor-pointer ${
-                            msg.sfxMuted
-                              ? 'border-red-200 bg-red-50 text-red-600'
-                              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
-                          }`}
-                        >
-                          {msg.sfxMuted ? (
-                            <VolumeX className="h-3 w-3" />
-                          ) : (
-                            <Volume2 className="h-3 w-3" />
+                      (msg.visualEffect && msg.visualEffect !== 'none') ||
+                      (msg.sfxOffsetMs ?? 0) !== 0 ||
+                      msg.cameraZoom) && (
+                      <div className="mt-2 space-y-1.5 border-t border-slate-100 pt-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {msg.sfxCue && (
+                            <span
+                              title={`Parsed SFX tag: ${msg.sfxCue}`}
+                              className={`inline-flex max-w-[130px] items-center gap-1 truncate rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                                resolvedLineSfx && !msg.sfxMuted
+                                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                  : 'border-amber-200 bg-amber-50 text-amber-800'
+                              }`}
+                            >
+                              <Volume2 className="h-2.5 w-2.5 shrink-0" />
+                              <span className="truncate">{msg.sfxCue}</span>
+                            </span>
                           )}
-                        </button>
 
-                        {!isSpecialCue && (
                           <select
-                            aria-label="Line visual effect"
-                            value={msg.visualEffect ?? 'none'}
+                            aria-label="Line sound effect"
+                            value={msg.sfxFileId ?? 'auto'}
                             onChange={(e) =>
                               onUpdateMessageMeta(msg.id, {
-                                visualEffect: e.target.value as VisualEffectType,
+                                sfxFileId: e.target.value,
                               })
                             }
-                            title="Visual screen effect on this line"
-                            className={`h-6 rounded-md border px-1.5 text-[10.5px] font-semibold outline-none ${
-                              msg.visualEffect && msg.visualEffect !== 'none'
-                                ? 'border-red-200 bg-red-50 text-red-700'
-                                : 'border-slate-200 bg-slate-50 text-slate-600'
+                            className="h-6 min-w-0 flex-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 text-[10.5px] font-medium text-slate-700 outline-none focus:border-slate-400 focus:bg-white"
+                          >
+                            <option value="auto">
+                              {autoMatchedLineSfx
+                                ? `Auto: ${autoMatchedLineSfx.baseName}`
+                                : msg.sfxCue
+                                  ? 'Auto (Load Sound Bank)'
+                                  : 'SFX: None'}
+                            </option>
+                            <option value="none">No SFX</option>
+                            {soundBank.map((file) => (
+                              <option key={file.id} value={file.id}>
+                                {file.name}
+                              </option>
+                            ))}
+                          </select>
+
+                          {resolvedLineSfx && (
+                            <button
+                              type="button"
+                              disabled={Boolean(msg.sfxMuted)}
+                              onClick={() =>
+                                onAuditionSoundFile(
+                                  resolvedLineSfx.id,
+                                  msg.sfxVolume ?? 0.9
+                                )
+                              }
+                              title={`Preview ${resolvedLineSfx.name}`}
+                              aria-label="Preview line SFX"
+                              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-40 cursor-pointer"
+                            >
+                              <Play className="h-2.5 w-2.5 fill-current" />
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onUpdateMessageMeta(msg.id, {
+                                sfxMuted: !msg.sfxMuted,
+                              })
+                            }
+                            title={msg.sfxMuted ? 'Unmute line SFX' : 'Mute line SFX'}
+                            aria-label={msg.sfxMuted ? 'Unmute line SFX' : 'Mute line SFX'}
+                            className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border transition-colors cursor-pointer ${
+                              msg.sfxMuted
+                                ? 'border-red-200 bg-red-50 text-red-600'
+                                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
                             }`}
                           >
-                            <option value="none">FX: None</option>
-                            <option value="red_flash">FX: Red Flash</option>
-                            <option value="cut_to_black">FX: Cut Black</option>
-                          </select>
+                            {msg.sfxMuted ? (
+                              <VolumeX className="h-3 w-3" />
+                            ) : (
+                              <Volume2 className="h-3 w-3" />
+                            )}
+                          </button>
+
+                          {!isSpecialCue && (
+                            <select
+                              aria-label="Line visual effect"
+                              value={msg.visualEffect ?? 'none'}
+                              onChange={(e) =>
+                                onUpdateMessageMeta(msg.id, {
+                                  visualEffect: e.target.value as VisualEffectType,
+                                })
+                              }
+                              title="Visual screen effect on this line"
+                              className={`h-6 rounded-md border px-1.5 text-[10.5px] font-semibold outline-none ${
+                                msg.visualEffect && msg.visualEffect !== 'none'
+                                  ? 'border-red-200 bg-red-50 text-red-700'
+                                  : 'border-slate-200 bg-slate-50 text-slate-600'
+                              }`}
+                            >
+                              <option value="none">FX: None</option>
+                              <option value="red_flash">FX: Red Flash</option>
+                              <option value="cut_to_black">FX: Cut Black</option>
+                            </select>
+                          )}
+
+                          {!isSpecialCue && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onUpdateMessageMeta(msg.id, {
+                                  cameraZoom: !msg.cameraZoom,
+                                })
+                              }
+                              title="Toggle punch-in camera zoom on this line"
+                              className={`inline-flex h-6 items-center rounded-md border px-1.5 font-mono text-[10px] font-semibold transition-colors cursor-pointer ${
+                                msg.cameraZoom
+                                  ? 'border-indigo-300 bg-indigo-50 text-indigo-700'
+                                  : 'border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100'
+                              }`}
+                            >
+                              ZOOM
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Compact Per-Line SFX Mode (Hold / Duck / Cut) + Offset Slider (-1000ms to +1000ms) */}
+                        {(resolvedLineSfx ||
+                          msg.sfxCue ||
+                          (msg.sfxOffsetMs ?? 0) !== 0) && (
+                          <div className="space-y-1.5 px-0.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[10px] font-semibold text-slate-500 whitespace-nowrap">
+                                SFX Tail
+                              </span>
+                              <div
+                                role="group"
+                                aria-label="SFX overlap behavior"
+                                className="inline-flex items-center rounded-md border border-slate-200 bg-slate-100 p-0.5"
+                              >
+                                {(
+                                  [
+                                    {
+                                      id: 'hold_until_done' as SfxPlaybackMode,
+                                      label: 'Hold',
+                                      title:
+                                        'Wait for SFX to finish (up to 2.0s max), then smoothly duck any remaining tail (120ms)',
+                                    },
+                                    {
+                                      id: 'duck_on_next' as SfxPlaybackMode,
+                                      label: 'Duck',
+                                      title:
+                                        'Start next message on normal pacing and smoothly fade this SFX down over 120ms',
+                                    },
+                                    {
+                                      id: 'cut_on_next' as SfxPlaybackMode,
+                                      label: 'Cut',
+                                      title:
+                                        'Cut this SFX cleanly the instant the next event begins',
+                                    },
+                                  ] as const
+                                ).map((opt) => {
+                                  const activeMode: SfxPlaybackMode =
+                                    msg.sfxMode ?? 'hold_until_done';
+                                  const isActive = activeMode === opt.id;
+                                  return (
+                                    <button
+                                      key={opt.id}
+                                      type="button"
+                                      title={opt.title}
+                                      onClick={() =>
+                                        onUpdateMessageMeta(msg.id, {
+                                          sfxMode: opt.id,
+                                        })
+                                      }
+                                      className={`rounded px-2 py-0.5 text-[10px] font-semibold transition-colors cursor-pointer ${
+                                        isActive
+                                          ? 'bg-slate-900 text-white shadow-xs'
+                                          : 'text-slate-600 hover:text-slate-900'
+                                      }`}
+                                    >
+                                      {opt.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-semibold text-slate-500 whitespace-nowrap">
+                                SFX Offset
+                              </span>
+                              <input
+                                type="range"
+                                aria-label="SFX Offset in milliseconds"
+                                min={-1000}
+                                max={1000}
+                                step={25}
+                                value={msg.sfxOffsetMs ?? 0}
+                                onChange={(e) =>
+                                  onUpdateMessageMeta(msg.id, {
+                                    sfxOffsetMs: Number(e.target.value),
+                                  })
+                                }
+                                className="h-1 flex-1 accent-slate-900 cursor-pointer"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateMessageMeta(msg.id, { sfxOffsetMs: 0 })
+                                }
+                                title="Click to reset SFX offset to 0ms"
+                                className={`w-14 text-right font-mono text-[10px] font-semibold tabular-nums cursor-pointer ${
+                                  (msg.sfxOffsetMs ?? 0) !== 0
+                                    ? 'text-indigo-700'
+                                    : 'text-slate-400 hover:text-slate-700'
+                                }`}
+                              >
+                                {(msg.sfxOffsetMs ?? 0) > 0
+                                  ? `+${msg.sfxOffsetMs}ms`
+                                  : `${msg.sfxOffsetMs ?? 0}ms`}
+                              </button>
+                            </div>
+                          </div>
                         )}
                       </div>
                     )}
@@ -2220,11 +2484,11 @@ export const EditorPanel = React.memo(function EditorPanel({
                     <div className="mb-1 flex items-center justify-between text-[11px] font-semibold text-slate-500">
                       <span>Video Audio Track</span>
                       <span className="text-[10px] text-slate-400">
-                        {masterAudioMuted
+                        {masterAudioMuted || masterAudioVolume <= 0
                           ? 'Master audio muted'
                           : soundBank.length > 0
-                            ? 'SFX + Loop ready'
-                            : 'Built-in typing SFX'}
+                            ? `SFX + Loop (${Math.round(masterAudioVolume * 100)}%)`
+                            : `Typing SFX (${Math.round(masterAudioVolume * 100)}%)`}
                       </span>
                     </div>
                     <div className="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1">
@@ -2266,7 +2530,9 @@ export const EditorPanel = React.memo(function EditorPanel({
                   <span>
                     MP4 Video (60 FPS){' '}
                     <span className="text-[10.5px] font-semibold text-slate-400">
-                      {videoAudioMode === 'baked' && !masterAudioMuted
+                      {videoAudioMode === 'baked' &&
+                      !masterAudioMuted &&
+                      masterAudioVolume > 0
                         ? '· + Audio'
                         : '· Silent'}
                     </span>
@@ -2285,7 +2551,9 @@ export const EditorPanel = React.memo(function EditorPanel({
                   <span>
                     WebM Video (60 FPS){' '}
                     <span className="text-[10.5px] font-semibold text-slate-400">
-                      {videoAudioMode === 'baked' && !masterAudioMuted
+                      {videoAudioMode === 'baked' &&
+                      !masterAudioMuted &&
+                      masterAudioVolume > 0
                         ? '· + Audio'
                         : '· Silent'}
                     </span>
@@ -2311,7 +2579,10 @@ export const EditorPanel = React.memo(function EditorPanel({
                   type="button"
                   role="menuitem"
                   disabled={
-                    isExportingWav || masterAudioMuted || messages.length === 0
+                    isExportingWav ||
+                    masterAudioMuted ||
+                    masterAudioVolume <= 0 ||
+                    messages.length === 0
                   }
                   onClick={() => {
                     setOpenMenu(null);

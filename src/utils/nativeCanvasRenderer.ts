@@ -1,7 +1,9 @@
 import { marked, type Token, type Tokens } from 'marked';
 import {
+  type ActiveEmojiBurst,
   type ActiveVisualEffect,
   type AiSkin,
+  type CameraTransform,
   type ChatMessage,
   type CustomAiIconId,
   type DeviceMode,
@@ -9,6 +11,7 @@ import {
   type MessageAttachment,
   type MessageRole,
   type MessageSenderSkin,
+  NEUTRAL_CAMERA_TRANSFORM,
   type PlaybackSpeed,
   type PreviewMode,
   type StageOverlay,
@@ -67,6 +70,8 @@ export interface AnimationFrameState {
   composerDraft: string;
   sendHighlighted: boolean;
   activeVisualEffect: ActiveVisualEffect | null;
+  cameraTransform: CameraTransform;
+  activeEmojiBurst: ActiveEmojiBurst | null;
   timeMs: number;
 }
 
@@ -261,31 +266,179 @@ function tokenizeWordsPreservingWhitespace(text: string): string[] {
 }
 
 function evaluateRedFlashIntensity(elapsedInWindowMs: number, durationMs: number): number {
-  if (elapsedInWindowMs < 0 || elapsedInWindowMs > durationMs) return 0;
+  if (elapsedInWindowMs < 0 || elapsedInWindowMs >= durationMs) return 0;
   const t = elapsedInWindowMs / Math.max(1, durationMs);
-  // Snappy double-pulse crimson flash curve
-  if (t < 0.14) {
-    return t / 0.14;
+  // Guarantee 100% pure white/dark canvas reset in the final 8% (~48ms) so zero pink tint bleeds
+  if (t >= 0.92) return 0;
+  const activeT = t / 0.92;
+  // Snappy 0.6s double-pulse crimson flash curve
+  if (activeT < 0.16) {
+    return activeT / 0.16;
   }
-  if (t < 0.34) {
-    return 1 - ((t - 0.14) / 0.2) * 0.62;
+  if (activeT < 0.38) {
+    return 1 - ((activeT - 0.16) / 0.22) * 0.58;
   }
-  if (t < 0.48) {
-    return 0.38 + ((t - 0.34) / 0.14) * 0.42;
+  if (activeT < 0.54) {
+    return 0.42 + ((activeT - 0.38) / 0.16) * 0.42;
   }
-  return Math.max(0, 0.8 * (1 - (t - 0.48) / 0.52));
+  return Math.max(0, 0.84 * (1 - (activeT - 0.54) / 0.46));
+}
+
+function easeInOutCubic(t: number): number {
+  const c = Math.max(0, Math.min(1, t));
+  return c < 0.5 ? 4 * c * c * c : 1 - Math.pow(-2 * c + 2, 3) / 2;
+}
+
+function easeOutCubic(t: number): number {
+  const c = Math.max(0, Math.min(1, t));
+  return 1 - Math.pow(1 - c, 3);
+}
+
+function parseHexRgb(hex: string): [number, number, number] {
+  const cleaned = hex.replace('#', '').trim();
+  const full =
+    cleaned.length === 3
+      ? cleaned
+          .split('')
+          .map((c) => c + c)
+          .join('')
+      : cleaned;
+  const num = Number.parseInt(full, 16);
+  if (Number.isNaN(num)) return [0, 0, 0];
+  return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+}
+
+export function lerpHexColor(hexA: string, hexB: string, t: number): string {
+  const clamped = Math.max(0, Math.min(1, t));
+  if (clamped <= 0.001) return hexA;
+  if (clamped >= 0.999) return hexB;
+  const [r1, g1, b1] = parseHexRgb(hexA);
+  const [r2, g2, b2] = parseHexRgb(hexB);
+  const r = Math.round(r1 + (r2 - r1) * clamped);
+  const g = Math.round(g1 + (g2 - g1) * clamped);
+  const b = Math.round(b1 + (b2 - b1) * clamped);
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+const TRAILING_EMOJI_REGEX =
+  /(\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*)$/u;
+
+export function extractTrailingEmoji(text: string): string | null {
+  const cleaned = text.trim().replace(/[*_~`"'\s]+$/g, '');
+  if (!cleaned) return null;
+  const match = cleaned.match(TRAILING_EMOJI_REGEX);
+  return match ? match[1] : null;
+}
+
+export function isThinkingDotsMessage(msg: ChatMessage): boolean {
+  if (msg.cueKind === 'typing') return true;
+  if (msg.role === 'assistant' && !msg.cueKind) {
+    const stripped = msg.content
+      .replace(/[*_~`"'()[\]]+/g, '')
+      .replace(/\s+/g, '')
+      .trim();
+    if (!stripped) return false;
+    return /^(?:\.{2,}|…+|•{2,})$/.test(stripped);
+  }
+  return false;
+}
+
+const DRAMATIC_SFX_HEAVY_REGEX =
+  /\b(vine\s*boom|emotional\s*damage|faa+h+|fah|bass\s*drop|red\s*alert|alarm|siren|explosion|metal\s*pipe|thunder|slam|impact|dun\s*dun)\b/i;
+
+const DRAMATIC_SFX_PUNCHLINE_REGEX =
+  /\b(vine\s*boom|boom|emotional\s*damage|faa+h+|fah|rizz|anime\s*wow|wow|bruh|oof|airhorn|bass\s*drop|red\s*alert|alarm|siren|record\s*scratch|dun\s*dun|dramatic|shock|gasp|slam|explosion|metal\s*pipe|thunder|scream|wtf|nani|alert|impact)\b/i;
+
+export function isDramaticPunchlineMessage(msg: ChatMessage): boolean {
+  if (msg.cameraZoom) return true;
+  if (msg.sfxMuted || msg.sfxFileId === 'none') return false;
+  if (msg.sfxCue && DRAMATIC_SFX_PUNCHLINE_REGEX.test(msg.sfxCue)) {
+    return true;
+  }
+  return false;
+}
+
+function getPunchlineZoomScale(msg: ChatMessage, msgIndex: number): number {
+  if (msg.cameraZoom) return 1.15;
+  if (msg.sfxCue && DRAMATIC_SFX_HEAVY_REGEX.test(msg.sfxCue)) {
+    return msgIndex % 2 === 0 ? 1.16 : 1.14;
+  }
+  // Smooth dramatic range between 1.12x and 1.15x for punchlines
+  return 1.12 + ((msgIndex * 13) % 4) * 0.01;
+}
+
+/**
+ * Automatic human reading pause after each message finishes typing:
+ * AI messages default to 1.8s–2.4s (scaled dynamically by word count),
+ * modulated by the user's Reading Hold Multiplier slider (0.5x–2.0x) and playback speed.
+ */
+export function computeReadingHoldMs(
+  content: string,
+  readingPacing = 1.0,
+  speed: PlaybackSpeed = 1,
+  minBaseMs = 1800,
+  maxBaseMs = 2400
+): number {
+  const trimmed = content.trim();
+  if (!trimmed) return 150;
+  const wordCount = trimmed.split(/\s+/).length;
+  const rawBaseMs =
+    minBaseMs >= 1600
+      ? 1680 + wordCount * 30
+      : Math.max(minBaseMs, minBaseMs - 100 + wordCount * 40);
+  const baseMs = Math.min(maxBaseMs, Math.max(minBaseMs, rawBaseMs));
+  const clampedPacing = Math.max(0.25, Math.min(2.5, readingPacing));
+  const scaled = (baseMs * clampedPacing) / Math.max(0.25, speed);
+  return Math.max(150, Math.round(scaled));
+}
+
+interface CameraZoomWindow {
+  zoomInStartMs: number;
+  zoomInEndMs: number;
+  zoomOutStartMs: number;
+  zoomOutEndMs: number;
+  targetScale: number;
+  originX: number;
+  originY: number;
+}
+
+interface RedFlashWindow {
+  startMs: number;
+  durationMs: number;
+  originX: number;
+  originY: number;
+}
+
+interface EmojiBurstWindow {
+  id: string;
+  messageId: string;
+  emoji: string;
+  startMs: number;
+  durationMs: number;
 }
 
 export function buildAnimationTimeline(
   messages: ChatMessage[],
   speed: PlaybackSpeed,
   showBottomBar: boolean,
-  options?: { includeFinalHold?: boolean }
+  options?: {
+    includeFinalHold?: boolean;
+    readingPacing?: number;
+    autoCameraMotion?: boolean;
+    emojiBurstEnabled?: boolean;
+    sfxDurationsMs?: Record<string, number>;
+  }
 ): AnimationTimeline {
   const effectiveSpeed = getEffectivePlaybackMultiplier(speed);
   const includeFinalHold = options?.includeFinalHold ?? true;
+  const readingPacing = options?.readingPacing ?? 1.0;
+  const autoCameraMotion = options?.autoCameraMotion ?? true;
+  const emojiBurstEnabled = options?.emojiBurstEnabled ?? true;
+  const sfxDurationsMs = options?.sfxDurationsMs;
   const segments: TimelineSegment[] = [];
-  const redFlashWindows: Array<{ startMs: number; durationMs: number }> = [];
+  const redFlashWindows: RedFlashWindow[] = [];
+  const zoomWindows: CameraZoomWindow[] = [];
+  const emojiBurstWindows: EmojiBurstWindow[] = [];
   let cursorMs = 0;
 
   const pushSegment = (
@@ -300,13 +453,42 @@ export function buildAnimationTimeline(
     return created;
   };
 
-  pushSegment(Math.round(75 / effectiveSpeed), { kind: 'idle', msgIndex: -1 });
+  // Hold an unzoomed 1.0x opening beat at t = 0.0s before typing begins
+  const openingIdleSeg = pushSegment(
+    Math.max(200, Math.round(110 / effectiveSpeed)),
+    { kind: 'idle', msgIndex: -1 }
+  );
+
+  // When sfxMode is 'hold_until_done' (default), hold the next action until the SFX finishes (capped at 2.0s max)
+  const computeSfxHoldFloorMs = (
+    msg: ChatMessage,
+    alreadyElapsedAfterTriggerMs: number
+  ): number => {
+    if (
+      (msg.sfxMode ?? 'hold_until_done') !== 'hold_until_done' ||
+      msg.sfxMuted ||
+      msg.sfxFileId === 'none'
+    ) {
+      return 0;
+    }
+    const rawDurMs = sfxDurationsMs?.[msg.id] ?? 0;
+    if (rawDurMs <= 0) return 0;
+    const cappedSfxMs = Math.min(2000, Math.round(rawDurMs));
+    const posOffsetMs = Math.max(0, Math.min(1000, msg.sfxOffsetMs ?? 0));
+    const neededAfterTriggerMs = Math.min(2080, cappedSfxMs + posOffsetMs + 80);
+    return Math.max(0, neededAfterTriggerMs - alreadyElapsedAfterTriggerMs);
+  };
 
   messages.forEach((msg, index) => {
     const prevMsg = index > 0 ? messages[index - 1] : null;
+    const hasExplicitPostHold = Boolean(msg.postHoldSec && msg.postHoldSec > 0);
+    const isPunchline = autoCameraMotion && isDramaticPunchlineMessage(msg);
 
-    if (msg.cueKind === 'typing') {
-      const holdMs = Math.max(200, Math.round((msg.holdDurationSec ?? 1.5) * 1000));
+    if (isThinkingDotsMessage(msg)) {
+      const holdMs = Math.max(
+        200,
+        Math.round((msg.holdDurationSec ?? 1.2) * 1000)
+      );
       pushSegment(holdMs, {
         kind: 'thinking',
         msgIndex: index,
@@ -337,15 +519,28 @@ export function buildAnimationTimeline(
 
     if (msg.cueKind === 'visual_effect') {
       const eff = msg.visualEffect === 'red_flash' ? 'red_flash' : 'cut_to_black';
-      const defaultSec = eff === 'cut_to_black' ? 1.3 : 0.7;
-      const holdMs = Math.max(200, Math.round((msg.holdDurationSec ?? defaultSec) * 1000));
+      const defaultSec = eff === 'cut_to_black' ? 1.3 : 0.65;
+      const baseHoldMs = Math.max(
+        eff === 'red_flash' ? 650 : 200,
+        Math.round((msg.holdDurationSec ?? defaultSec) * 1000)
+      );
+      const sfxFloorMs = computeSfxHoldFloorMs(msg, 0);
+      const holdMs = Math.max(baseHoldMs, sfxFloorMs);
       const seg = pushSegment(holdMs, {
         kind: 'visual_effect',
         msgIndex: index,
         visualEffect: eff,
       });
       if (eff === 'red_flash') {
-        redFlashWindows.push({ startMs: seg.startMs, durationMs: Math.max(650, holdMs) });
+        const focusOriginX =
+          prevMsg?.role === 'user' ? 0.72 : prevMsg?.role === 'system' ? 0.5 : 0.2;
+        // Strictly 0.6s pulse with >= 50ms pure background reset before next line starts
+        redFlashWindows.push({
+          startMs: seg.startMs,
+          durationMs: 600,
+          originX: focusOriginX,
+          originY: 0.58,
+        });
       }
       if (msg.postHoldSec && msg.postHoldSec > 0) {
         pushSegment(Math.round(msg.postHoldSec * 1000), {
@@ -363,11 +558,25 @@ export function buildAnimationTimeline(
         kind: 'system_enter',
         msgIndex: index,
       });
+      const enterDur = Math.max(0, enterSeg.endMs - enterSeg.startMs);
+      const redFlashStartMs = enterSeg.startMs;
       if (msg.visualEffect === 'red_flash') {
-        redFlashWindows.push({ startMs: enterSeg.startMs, durationMs: 680 });
+        redFlashWindows.push({
+          startMs: redFlashStartMs,
+          durationMs: 600,
+          originX: 0.5,
+          originY: 0.56,
+        });
       }
-      // Snappy 150ms post-message gap at 1x speed (effectiveSpeed = 0.5)
-      pushSegment(Math.round(75 / effectiveSpeed), {
+      const sfxElapsed = animate ? Math.round(enterDur * 0.05) : enterDur;
+      const sfxFloorMs = computeSfxHoldFloorMs(msg, sfxElapsed);
+      const redResetFloorMs =
+        msg.visualEffect === 'red_flash' ? Math.max(0, 650 - enterDur) : 0;
+      const basePostGapMs = hasExplicitPostHold
+        ? Math.round(75 / effectiveSpeed)
+        : computeReadingHoldMs(msg.content, readingPacing, speed, 800, 1100);
+      const postGapMs = Math.max(basePostGapMs, sfxFloorMs, redResetFloorMs);
+      pushSegment(postGapMs, {
         kind: 'idle',
         msgIndex: index,
       });
@@ -384,20 +593,40 @@ export function buildAnimationTimeline(
           msgIndex: index,
         });
       }
+      if (isPunchline) {
+        const zStart = enterSeg.startMs;
+        const zEnd = zStart + Math.round(240 / Math.max(0.5, speed));
+        const zOutStart = cursorMs;
+        zoomWindows.push({
+          zoomInStartMs: zStart,
+          zoomInEndMs: Math.min(zEnd, zOutStart),
+          zoomOutStartMs: zOutStart,
+          zoomOutEndMs: zOutStart + Math.round(320 / Math.max(0.5, speed)),
+          targetScale: getPunchlineZoomScale(msg, index),
+          originX: 0.5,
+          originY: 0.56,
+        });
+      }
     } else if (msg.role === 'user') {
+      let typingStartMs: number | null = null;
       if (showBottomBar) {
         const chars = Array.from(msg.content);
         if (chars.length > 0) {
-          pushSegment(Math.round((chars.length * 22) / effectiveSpeed), {
-            kind: 'user_typing',
-            msgIndex: index,
-            chars,
-          });
+          const typeSeg = pushSegment(
+            Math.round((chars.length * 22) / effectiveSpeed),
+            {
+              kind: 'user_typing',
+              msgIndex: index,
+              chars,
+            }
+          );
+          typingStartMs = typeSeg.startMs;
         }
-        pushSegment(Math.round(140 / effectiveSpeed), {
+        const preSeg = pushSegment(Math.round(140 / effectiveSpeed), {
           kind: 'user_presend',
           msgIndex: index,
         });
+        if (typingStartMs === null) typingStartMs = preSeg.startMs;
         pushSegment(Math.round(220 / effectiveSpeed), {
           kind: 'user_send_highlight',
           msgIndex: index,
@@ -407,11 +636,43 @@ export function buildAnimationTimeline(
         kind: 'user_slide',
         msgIndex: index,
       });
-      if (msg.visualEffect === 'red_flash') {
-        redFlashWindows.push({ startMs: slideSeg.startMs, durationMs: 680 });
+      const slideDur = Math.max(0, slideSeg.endMs - slideSeg.startMs);
+
+      // Anchor user_typing zoom at x: 34%, y: 90% with max scale 1.07x (never clips paperclip or user bubbles),
+      // and snap cleanly back to 1.0x (140ms) the moment the user sends!
+      if (autoCameraMotion && showBottomBar && typingStartMs !== null) {
+        const typingSpan = Math.max(1, slideSeg.startMs - typingStartMs);
+        const zoomInDur = Math.min(
+          typingSpan,
+          Math.min(420, Math.max(180, Math.round(typingSpan * 0.55)))
+        );
+        zoomWindows.push({
+          zoomInStartMs: typingStartMs,
+          zoomInEndMs: typingStartMs + zoomInDur,
+          zoomOutStartMs: slideSeg.startMs,
+          zoomOutEndMs: slideSeg.startMs + 140,
+          targetScale: 1.07,
+          originX: 0.34,
+          originY: 0.9,
+        });
       }
-      // Snappy 150ms post-message gap at 1x speed (effectiveSpeed = 0.5)
-      pushSegment(Math.round(75 / effectiveSpeed), {
+
+      if (msg.visualEffect === 'red_flash') {
+        redFlashWindows.push({
+          startMs: slideSeg.startMs,
+          durationMs: 600,
+          originX: 0.72,
+          originY: 0.58,
+        });
+      }
+      const sfxFloorMs = computeSfxHoldFloorMs(msg, slideDur);
+      const redResetFloorMs =
+        msg.visualEffect === 'red_flash' ? Math.max(0, 650 - slideDur) : 0;
+      const baseReadingHoldMs = hasExplicitPostHold
+        ? Math.round(75 / effectiveSpeed)
+        : computeReadingHoldMs(msg.content, readingPacing, speed, 700, 1100);
+      const readingHoldMs = Math.max(baseReadingHoldMs, sfxFloorMs, redResetFloorMs);
+      pushSegment(readingHoldMs, {
         kind: 'idle',
         msgIndex: index,
       });
@@ -428,30 +689,64 @@ export function buildAnimationTimeline(
           msgIndex: index,
         });
       }
+      if (isPunchline) {
+        const zStart = slideSeg.startMs;
+        const zEnd = zStart + Math.round(240 / Math.max(0.5, speed));
+        const zOutStart = cursorMs;
+        zoomWindows.push({
+          zoomInStartMs: zStart,
+          zoomInEndMs: Math.min(zEnd, zOutStart),
+          zoomOutStartMs: zOutStart,
+          zoomOutEndMs: zOutStart + Math.round(260 / Math.max(0.5, speed)),
+          targetScale: Math.min(1.08, getPunchlineZoomScale(msg, index)),
+          originX: 0.72,
+          originY: 0.58,
+        });
+      }
     } else {
-      // Snappy 250ms default AI thinking pause at 1x speed (effectiveSpeed = 0.5);
-      // skipped when immediately preceded by an explicit [TYPING...] (Hold X sec) cue.
-      if (prevMsg?.cueKind !== 'typing') {
-        pushSegment(Math.round(125 / effectiveSpeed), {
+      // Viral 0.75s default AI thinking pause at 1x speed (effectiveSpeed = 0.5 => 375 / 0.5 = 750ms);
+      // skipped when immediately preceded by an explicit [TYPING...], "...", or (Hold X sec) cue.
+      if (!prevMsg || (!isThinkingDotsMessage(prevMsg) && prevMsg.cueKind !== 'hold')) {
+        pushSegment(Math.round(375 / effectiveSpeed), {
           kind: 'thinking',
           msgIndex: index,
         });
       }
       const words = tokenizeWordsPreservingWhitespace(msg.content);
-      let triggerStartMs = cursorMs;
+      let streamSeg: TimelineSegment | null = null;
+      let completionTriggerMs = cursorMs;
+      let remainingStreamAfterTriggerMs = 0;
       if (words.length > 0) {
-        const streamSeg = pushSegment(Math.round((words.length * 45) / effectiveSpeed), {
+        // Rapid, crisp AI reply streaming (~56ms/word at 1x speed)
+        streamSeg = pushSegment(Math.round((words.length * 28) / effectiveSpeed), {
           kind: 'ai_stream',
           msgIndex: index,
           words,
         });
-        triggerStartMs = streamSeg.startMs;
+        const streamDur = Math.max(0, streamSeg.endMs - streamSeg.startMs);
+        completionTriggerMs = Math.round(streamSeg.startMs + streamDur * 0.96);
+        remainingStreamAfterTriggerMs = Math.max(0, streamSeg.endMs - completionTriggerMs);
       }
       if (msg.visualEffect === 'red_flash') {
-        redFlashWindows.push({ startMs: triggerStartMs, durationMs: 680 });
+        // Strictly 0.6s deep crimson pulse + 1.15x punch-in + ±6px horizontal shake, returning 100% clean before next line
+        redFlashWindows.push({
+          startMs: completionTriggerMs,
+          durationMs: 600,
+          originX: 0.2,
+          originY: 0.58,
+        });
       }
-      // Snappy 150ms post-message gap at 1x speed (effectiveSpeed = 0.5)
-      pushSegment(Math.round(75 / effectiveSpeed), {
+      // Enforce automatic 1.8s–2.4s reading hold + SFX hold_until_done (capped at 2.0s max) + clean red_flash reset floor
+      const sfxFloorMs = computeSfxHoldFloorMs(msg, remainingStreamAfterTriggerMs);
+      const redResetFloorMs =
+        msg.visualEffect === 'red_flash'
+          ? Math.max(0, 650 - remainingStreamAfterTriggerMs)
+          : 0;
+      const baseReadingHoldMs = hasExplicitPostHold
+        ? Math.round(75 / effectiveSpeed)
+        : computeReadingHoldMs(msg.content, readingPacing, speed, 1800, 2400);
+      const readingHoldMs = Math.max(baseReadingHoldMs, sfxFloorMs, redResetFloorMs);
+      pushSegment(readingHoldMs, {
         kind: 'idle',
         msgIndex: index,
       });
@@ -467,6 +762,43 @@ export function buildAnimationTimeline(
           kind: 'post_hold',
           msgIndex: index,
         });
+      }
+      // Dramatic AI reply focal-point zoom (1.12x–1.16x anchored on left-center 20%, 58%)
+      if (isPunchline) {
+        const streamDur = streamSeg
+          ? Math.max(0, streamSeg.endMs - streamSeg.startMs)
+          : 0;
+        const zStart = streamSeg
+          ? Math.round(streamSeg.startMs + streamDur * 0.72)
+          : completionTriggerMs;
+        const zEnd = Math.min(
+          cursorMs,
+          zStart + Math.max(180, Math.round(280 / Math.max(0.5, speed)))
+        );
+        const zOutStart = cursorMs;
+        zoomWindows.push({
+          zoomInStartMs: zStart,
+          zoomInEndMs: Math.max(zStart + 1, zEnd),
+          zoomOutStartMs: zOutStart,
+          zoomOutEndMs: zOutStart + Math.round(340 / Math.max(0.5, speed)),
+          targetScale: getPunchlineZoomScale(msg, index),
+          originX: 0.2,
+          originY: 0.58,
+        });
+      }
+      // Completion-synced Pop-Up Emoji Burst beside dramatic AI bubbles ending in an emoji
+      if (emojiBurstEnabled && isDramaticPunchlineMessage(msg)) {
+        const trailingEmoji = extractTrailingEmoji(msg.content);
+        if (trailingEmoji) {
+          const offsetMs = Math.max(-1000, Math.min(1000, msg.sfxOffsetMs ?? 0));
+          emojiBurstWindows.push({
+            id: `burst-${msg.id}`,
+            messageId: msg.id,
+            emoji: trailingEmoji,
+            startMs: Math.max(0, completionTriggerMs + offsetMs),
+            durationMs: 1150,
+          });
+        }
       }
     }
   });
@@ -483,6 +815,153 @@ export function buildAnimationTimeline(
   }
 
   const totalDurationMs = cursorMs;
+
+  const evaluateCameraAt = (clampedMs: number): CameraTransform => {
+    if (!autoCameraMotion || clampedMs <= openingIdleSeg.endMs) {
+      return NEUTRAL_CAMERA_TRANSFORM;
+    }
+
+    let scale = 1;
+    let offsetX = 0;
+    const offsetY = 0;
+    let originWeightSum = 0;
+    let weightedOriginX = 0;
+    let weightedOriginY = 0;
+
+    // 1. Directional focal-point zoom windows (user_typing 34%/90% 1.07x & punchline left/right-center)
+    for (const zw of zoomWindows) {
+      if (clampedMs <= zw.zoomInStartMs || clampedMs >= zw.zoomOutEndMs) {
+        continue;
+      }
+      let factor = 1;
+      if (clampedMs < zw.zoomInEndMs) {
+        const dur = Math.max(1, zw.zoomInEndMs - zw.zoomInStartMs);
+        factor = easeInOutCubic((clampedMs - zw.zoomInStartMs) / dur);
+      } else if (clampedMs > zw.zoomOutStartMs) {
+        const dur = Math.max(1, zw.zoomOutEndMs - zw.zoomOutStartMs);
+        factor = 1 - easeInOutCubic((clampedMs - zw.zoomOutStartMs) / dur);
+      }
+      const winScale = 1 + (zw.targetScale - 1) * factor;
+      const weight = Math.max(0, winScale - 1);
+      if (weight > 0.0001) {
+        originWeightSum += weight;
+        weightedOriginX += zw.originX * weight;
+        weightedOriginY += zw.originY * weight;
+      }
+      if (winScale > scale) {
+        scale = winScale;
+      }
+    }
+
+    // 2. Red-Alert punch-in zoom (1.15x on active bubble) + damped horizontal camera shake (±6px)
+    for (const win of redFlashWindows) {
+      if (clampedMs <= win.startMs || clampedMs >= win.startMs + win.durationMs) {
+        continue;
+      }
+      const elapsed = clampedMs - win.startMs;
+      const dur = Math.max(1, win.durationMs);
+      const punchInDur = Math.min(100, dur * 0.18);
+      const releaseDur = Math.min(180, dur * 0.34);
+
+      let redZoomFactor = 1;
+      if (elapsed < punchInDur) {
+        redZoomFactor = easeOutCubic(elapsed / Math.max(1, punchInDur));
+      } else if (elapsed > dur - releaseDur) {
+        redZoomFactor =
+          1 - easeInOutCubic((elapsed - (dur - releaseDur)) / Math.max(1, releaseDur));
+      }
+      const redScale = 1 + 0.15 * redZoomFactor;
+      const redWeight = Math.max(0, redScale - 1) * 1.4;
+      if (redWeight > 0.0001) {
+        originWeightSum += redWeight;
+        weightedOriginX += win.originX * redWeight;
+        weightedOriginY += win.originY * redWeight;
+      }
+      if (redScale > scale) {
+        scale = redScale;
+      }
+
+      // Deterministic ±6px rapid damped horizontal shake that settles cleanly to 0 before window end
+      const tSec = elapsed / 1000;
+      const norm = elapsed / dur;
+      const decay = Math.exp(-norm * 4.2) * Math.max(0, 1 - Math.max(0, (norm - 0.78) / 0.22));
+      const amp = 6 * decay;
+      offsetX += Math.sin(tSec * Math.PI * 2 * 24) * amp;
+    }
+
+    if (
+      Math.abs(scale - 1) <= 0.0005 &&
+      Math.abs(offsetX) <= 0.05 &&
+      Math.abs(offsetY) <= 0.05
+    ) {
+      return NEUTRAL_CAMERA_TRANSFORM;
+    }
+
+    const originX =
+      originWeightSum > 0.0001 ? weightedOriginX / originWeightSum : 0.5;
+    const originY =
+      originWeightSum > 0.0001 ? weightedOriginY / originWeightSum : 0.5;
+
+    return {
+      scale,
+      offsetX,
+      offsetY,
+      originX,
+      originY,
+    };
+  };
+
+  const evaluateEmojiBurstAt = (clampedMs: number): ActiveEmojiBurst | null => {
+    if (!emojiBurstEnabled || emojiBurstWindows.length === 0) return null;
+    for (let i = emojiBurstWindows.length - 1; i >= 0; i--) {
+      const win = emojiBurstWindows[i];
+      if (clampedMs >= win.startMs && clampedMs <= win.startMs + win.durationMs) {
+        const p = (clampedMs - win.startMs) / Math.max(1, win.durationMs);
+        let scale = 1;
+        let opacity = 1;
+        let offsetY = -10;
+        let rotationDeg = 0;
+
+        if (p < 0.16) {
+          const t = easeOutCubic(p / 0.16);
+          scale = 0.25 + 1.0 * t;
+          opacity = Math.min(1, t * 1.35);
+          offsetY = 14 - 18 * t;
+          rotationDeg = -14 + 22 * t;
+        } else if (p < 0.3) {
+          const t = easeInOutCubic((p - 0.16) / 0.14);
+          scale = 1.25 - 0.25 * t;
+          opacity = 1;
+          offsetY = -4 - 5 * t;
+          rotationDeg = 8 - 8 * t;
+        } else if (p < 0.78) {
+          const t = (p - 0.3) / 0.48;
+          scale = 1 + Math.sin(t * Math.PI * 2) * 0.03;
+          opacity = 1;
+          offsetY = -9 - t * 6;
+          rotationDeg = Math.sin(t * Math.PI * 2) * 4;
+        } else {
+          const t = easeInOutCubic((p - 0.78) / 0.22);
+          scale = 1 - 0.14 * t;
+          opacity = Math.max(0, 1 - t);
+          offsetY = -15 - 12 * t;
+          rotationDeg = t * 6;
+        }
+
+        return {
+          id: win.id,
+          messageId: win.messageId,
+          emoji: win.emoji,
+          progress: p,
+          scale,
+          opacity,
+          offsetY,
+          rotationDeg,
+        };
+      }
+    }
+    return null;
+  };
 
   const evaluateAt = (elapsedMs: number): AnimationFrameState => {
     const clamped = Math.max(0, Math.min(elapsedMs, totalDurationMs));
@@ -523,9 +1002,19 @@ export function buildAnimationTimeline(
       }
     }
 
+    const cameraTransform =
+      activeSeg.visualEffect === 'cut_to_black'
+        ? NEUTRAL_CAMERA_TRANSFORM
+        : evaluateCameraAt(clamped);
+
+    const activeEmojiBurst =
+      activeSeg.visualEffect === 'cut_to_black'
+        ? null
+        : evaluateEmojiBurstAt(clamped);
+
     if (activeSeg.kind === 'final_hold') {
       for (const m of messages) {
-        if (m.cueKind) continue;
+        if (m.cueKind || isThinkingDotsMessage(m)) continue;
         visible.push({
           id: m.id,
           role: m.role,
@@ -549,6 +1038,8 @@ export function buildAnimationTimeline(
         composerDraft: '',
         sendHighlighted: false,
         activeVisualEffect,
+        cameraTransform,
+        activeEmojiBurst,
         timeMs: clamped,
       };
     }
@@ -563,7 +1054,7 @@ export function buildAnimationTimeline(
 
     for (let i = 0; i <= completedUpTo && i < messages.length; i++) {
       const m = messages[i];
-      if (m.cueKind) continue;
+      if (m.cueKind || isThinkingDotsMessage(m)) continue;
       visible.push({
         id: m.id,
         role: m.role,
@@ -664,6 +1155,8 @@ export function buildAnimationTimeline(
       composerDraft,
       sendHighlighted,
       activeVisualEffect,
+      cameraTransform,
+      activeEmojiBurst,
       timeMs: clamped,
     };
   };
@@ -2363,12 +2856,38 @@ export function renderChatFrameToCanvas(
       ? 'AI can make mistakes. Check important info.'
       : skinMeta.disclaimer;
 
+  const redTintAmount =
+    frame.activeVisualEffect?.type === 'red_flash'
+      ? Math.min(1, frame.activeVisualEffect.intensity * 1.15)
+      : 0;
+  const effectiveCanvasBg =
+    redTintAmount > 0.005
+      ? lerpHexColor(palette.canvasBg, '#3b0404', redTintAmount)
+      : palette.canvasBg;
+
   ctx.save();
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
 
-  // Full Canvas Background
-  ctx.fillStyle = palette.canvasBg;
+  // Full Canvas Background (outside camera transform so shake never exposes transparent edges)
+  ctx.fillStyle = effectiveCanvasBg;
   ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+
+  // Apply deterministic Directional Focal-Point Camera Zoom & Red-Alert Horizontal Shake
+  const cam = frame.cameraTransform;
+  const hasCameraMotion =
+    cam &&
+    (Math.abs(cam.scale - 1) > 0.0005 ||
+      Math.abs(cam.offsetX) > 0.05 ||
+      Math.abs(cam.offsetY) > 0.05);
+
+  ctx.save();
+  if (hasCameraMotion) {
+    const originX = logicalWidth * (cam.originX ?? 0.5);
+    const originY = logicalHeight * (cam.originY ?? 0.5);
+    ctx.translate(originX + cam.offsetX, originY + cam.offsetY);
+    ctx.scale(cam.scale, cam.scale);
+    ctx.translate(-originX, -originY);
+  }
 
   // Top Chrome Geometry
   const statusH =
@@ -2894,6 +3413,54 @@ export function renderChatFrameToCanvas(
           isClean16x9 ? 39 : 27
         );
       }
+
+      // Pop-Up Reaction Emoji Burst synced to dramatic AI message completion SFX
+      if (
+        frame.activeEmojiBurst &&
+        frame.activeEmojiBurst.messageId === item.msg.id &&
+        frame.activeEmojiBurst.opacity > 0.01
+      ) {
+        const burst = frame.activeEmojiBurst;
+        const badgeSize = isClean16x9 ? 62 : 42;
+        const emojiFontSize = isClean16x9 ? 40 : 26;
+        const badgeCx = bodyX + bodyW - badgeSize / 2 - 4;
+        const badgeCy =
+          drawY +
+          Math.min(Math.max(badgeSize / 2, item.height * 0.42), isClean16x9 ? 48 : 30) +
+          burst.offsetY;
+
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, Math.min(1, burst.opacity));
+        ctx.translate(badgeCx, badgeCy);
+        ctx.rotate((burst.rotationDeg * Math.PI) / 180);
+        ctx.scale(burst.scale, burst.scale);
+
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.32)';
+        ctx.shadowBlur = isClean16x9 ? 18 : 12;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = isClean16x9 ? 6 : 4;
+        ctx.fillStyle =
+          config.theme === 'dark'
+            ? 'rgba(28, 28, 32, 0.92)'
+            : 'rgba(255, 255, 255, 0.96)';
+        ctx.beginPath();
+        ctx.arc(0, 0, badgeSize / 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.shadowColor = 'transparent';
+        ctx.strokeStyle =
+          config.theme === 'dark'
+            ? 'rgba(255, 255, 255, 0.16)'
+            : 'rgba(15, 23, 42, 0.10)';
+        ctx.lineWidth = isClean16x9 ? 1.5 : 1;
+        ctx.stroke();
+
+        ctx.font = `400 ${emojiFontSize}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(burst.emoji, 0, isClean16x9 ? 2 : 1);
+        ctx.restore();
+      }
     } else if (item.kind === 'thinking') {
       const thinkingSkin: MessageSenderSkin =
         config.skin === 'multi'
@@ -2917,25 +3484,34 @@ export function renderChatFrameToCanvas(
           : undefined,
         imageCache
       );
-      const pulse =
-        0.28 +
-        0.72 * (0.5 + 0.5 * Math.cos((frame.timeMs / 1000) * Math.PI * 2));
-      const dotScale = 0.84 + 0.16 * pulse;
-      const dotRadius = isClean16x9 ? 7.5 : 5.5;
-      ctx.save();
-      ctx.globalAlpha = pulse;
-      ctx.fillStyle =
+      // Crisp 3-dot animated thinking wave (•••) synced pixel-for-pixel with PreviewCanvas
+      const dotRadius = isClean16x9 ? 5.5 : 4;
+      const dotSpacing = isClean16x9 ? 18 : 13;
+      const dotsStartX = bodyX + avatarSize + avatarGap + dotRadius;
+      const dotsBaseY = drawY + avatarSize / 2;
+      const dotColor =
         thinkingSkin === 'claude' ? '#d97757' : palette.textPrimary;
-      ctx.beginPath();
-      ctx.arc(
-        bodyX + avatarSize + avatarGap + dotRadius,
-        drawY + avatarSize / 2,
-        dotRadius * dotScale,
-        0,
-        Math.PI * 2
-      );
-      ctx.fill();
-      ctx.restore();
+
+      for (let d = 0; d < 3; d++) {
+        const phase = ((frame.timeMs - d * 150) / 900) * Math.PI * 2;
+        const wave = 0.5 - 0.5 * Math.cos(phase);
+        const alpha = 0.3 + 0.7 * wave;
+        const scaleFactor = 0.84 + 0.16 * wave;
+        const liftY = -3 * wave;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = dotColor;
+        ctx.beginPath();
+        ctx.arc(
+          dotsStartX + d * dotSpacing,
+          dotsBaseY + liftY,
+          dotRadius * scaleFactor,
+          0,
+          Math.PI * 2
+        );
+        ctx.fill();
+        ctx.restore();
+      }
     }
   }
 
@@ -2943,7 +3519,7 @@ export function renderChatFrameToCanvas(
 
   // Draw Sticky Top Chrome (Optional Header)
   if (config.showHeader) {
-    ctx.fillStyle = palette.canvasBg;
+    ctx.fillStyle = effectiveCanvasBg;
     ctx.fillRect(chatAreaX, 0, chatAreaW, topChromeH);
 
     if (isMobile && config.showIosStatusBar) {
@@ -3046,7 +3622,7 @@ export function renderChatFrameToCanvas(
 
   // Draw Sticky Bottom Chrome (Composer Bar + Optional Footer Disclaimer)
   if (config.showBottomBar || config.showFooterDisclaimer) {
-    ctx.fillStyle = palette.canvasBg;
+    ctx.fillStyle = effectiveCanvasBg;
     ctx.fillRect(
       chatAreaX,
       logicalHeight - bottomChromeH - 4,
@@ -3278,7 +3854,10 @@ export function renderChatFrameToCanvas(
     );
   }
 
-  // Draw Script Visual Effects (Red Flash / Hard Cut to Black) on top of entire frame
+  // End camera zoom/shake transform before full-frame visual effect overlay
+  ctx.restore();
+
+  // Draw Script Visual Effects (Red Flash / Hard Cut to Black) on top of entire viewport
   if (frame.activeVisualEffect) {
     drawVisualEffectOverlay(
       ctx,

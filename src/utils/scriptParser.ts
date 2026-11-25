@@ -16,7 +16,7 @@ import {
 } from '../types';
 import { buildAnimationTimeline } from './nativeCanvasRenderer';
 import { createOverlayId } from './overlays';
-import { fuzzyMatchSoundFile } from './soundEngine';
+import { buildSfxDurationMap, fuzzyMatchSoundFile } from './soundEngine';
 
 export interface ParsedScriptGifItem {
   kind: 'gif';
@@ -61,6 +61,7 @@ export interface ParsedScriptMessageItem {
   postHoldSec?: number;
   sfxCue?: string;
   visualEffect?: VisualEffectType;
+  cameraZoom?: boolean;
 }
 
 export type ParsedScriptItem =
@@ -104,6 +105,15 @@ function createScriptId(prefix: string, idx: number): string {
     return `${prefix}-${crypto.randomUUID()}`;
   }
   return `${prefix}-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function isEllipsisOnlyContent(text: string): boolean {
+  const stripped = text
+    .replace(/[*_~`"'()[\]]+/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+  if (!stripped) return false;
+  return /^(?:\.{2,}|…+|•{2,})$/.test(stripped);
 }
 
 function extractExplicitHoldSeconds(text: string): number | null {
@@ -191,6 +201,17 @@ function extractVisualEffects(text: string): {
 
   cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
   return { cleaned, effect };
+}
+
+function extractZoomTag(text: string): { cleaned: string; cameraZoom: boolean } {
+  const regex = /[\[(]\s*(?:camera\s*)?zoom(?:\s*in)?\s*[\])]/gi;
+  if (!regex.test(text)) {
+    return { cleaned: text, cameraZoom: false };
+  }
+  return {
+    cleaned: text.replace(regex, '').replace(/\s{2,}/g, ' ').trim(),
+    cameraZoom: true,
+  };
 }
 
 function parseBackgroundLoopLine(
@@ -315,17 +336,18 @@ export function parseScriptText(rawScript: string): ParsedScriptResult {
       continue;
     }
 
-    // 2. Extract [SFX: ...] and Visual Effects from line
+    // 2. Extract [SFX: ...], Visual Effects, and [ZOOM] from line
     const { cleaned: withoutSfx, sfxCues } = extractSfxTags(line);
     const primarySfx = sfxCues[0];
+    const { cleaned: withoutZoom, cameraZoom } = extractZoomTag(withoutSfx);
     const { cleaned: withoutVfx, effect: visualEffect } =
-      extractVisualEffects(withoutSfx);
+      extractVisualEffects(withoutZoom);
 
     // 3. Standalone Visual Effect line (e.g. "(Hard cut to black)" or "(Visual Effect: Screen flashes red)")
     if (visualEffect !== 'none' && !stripHoldTags(withoutVfx)) {
       const holdSec = parseHoldSeconds(
         withoutVfx,
-        visualEffect === 'cut_to_black' ? 1.3 : 0.7
+        visualEffect === 'cut_to_black' ? 1.3 : 0.65
       );
       items.push({
         kind: 'visual_effect',
@@ -382,7 +404,7 @@ export function parseScriptText(rawScript: string): ParsedScriptResult {
           };
         }
       }
-      const holdSec = parseHoldSeconds(tail, 1.5);
+      const holdSec = parseHoldSeconds(tail, 1.2);
       items.push({
         kind: 'typing',
         speaker,
@@ -424,6 +446,27 @@ export function parseScriptText(rawScript: string): ParsedScriptResult {
       }
 
       const resolved = resolveSpeaker(rawSpeaker, customColorIndex);
+
+      // Parse "ChatGPT: ..." / "Gemini: ..." / "Claude: ..." as temporary animated thinking dots (1.2s hold), never a literal bubble
+      if (
+        resolved.role === 'assistant' &&
+        isEllipsisOnlyContent(content) &&
+        visualEffect === 'none'
+      ) {
+        items.push({
+          kind: 'typing',
+          speaker: {
+            senderSkin: resolved.senderSkin ?? 'chatgpt',
+            customSenderName: resolved.customSenderName,
+            customSenderColor: resolved.customSenderColor,
+            customSenderIcon: resolved.customSenderIcon,
+          },
+          holdSec: inlineHoldSec ?? 1.2,
+          sfxCue: primarySfx,
+        });
+        continue;
+      }
+
       if (content || visualEffect !== 'none' || primarySfx || inlineHoldSec !== null) {
         items.push({
           kind: 'message',
@@ -436,8 +479,22 @@ export function parseScriptText(rawScript: string): ParsedScriptResult {
           postHoldSec: inlineHoldSec ?? undefined,
           sfxCue: primarySfx,
           visualEffect: visualEffect !== 'none' ? visualEffect : undefined,
+          cameraZoom: cameraZoom || undefined,
         });
       }
+      continue;
+    }
+
+    // 6b. Standalone "..." ellipsis line -> temporary animated thinking dots (1.2s hold)
+    const bareEllipsisHold = extractExplicitHoldSeconds(withoutVfx);
+    const bareEllipsisText =
+      bareEllipsisHold !== null ? stripHoldTags(withoutVfx) : withoutVfx;
+    if (isEllipsisOnlyContent(bareEllipsisText) && visualEffect === 'none') {
+      items.push({
+        kind: 'typing',
+        holdSec: bareEllipsisHold ?? 1.2,
+        sfxCue: primarySfx,
+      });
       continue;
     }
 
@@ -452,6 +509,7 @@ export function parseScriptText(rawScript: string): ParsedScriptResult {
         postHoldSec: inlineHoldSec ?? undefined,
         sfxCue: primarySfx,
         visualEffect: visualEffect !== 'none' ? visualEffect : undefined,
+        cameraZoom: cameraZoom || undefined,
       });
       continue;
     }
@@ -564,9 +622,16 @@ export function autoBuildFromScript(
     showBottomBar: boolean;
     soundBank: SoundBankFile[];
     currentSkin: AiSkin;
+    readingPacing?: number;
   }
 ): AutoBuildOutput {
-  const { speed, showBottomBar, soundBank, currentSkin } = options;
+  const {
+    speed,
+    showBottomBar,
+    soundBank,
+    currentSkin,
+    readingPacing = 1.0,
+  } = options;
   const parsed = parseScriptText(rawScript);
 
   const messages: ChatMessage[] = [];
@@ -608,6 +673,8 @@ export function autoBuildFromScript(
         sfxFileId: item.sfxCue ? 'auto' : undefined,
         sfxMuted: false,
         sfxVolume: 0.9,
+        sfxMode: 'hold_until_done',
+        cameraZoom: item.cameraZoom,
       });
     } else if (item.kind === 'typing') {
       trackMatch(item.sfxCue);
@@ -676,8 +743,11 @@ export function autoBuildFromScript(
   });
 
   // Compute exact timeline timestamps so every [GIF]: placeholder lands at the exact millisecond!
+  const sfxDurationsMs = buildSfxDurationMap(messages, soundBank);
   const timeline = buildAnimationTimeline(messages, speed, showBottomBar, {
     includeFinalHold: true,
+    readingPacing,
+    sfxDurationsMs,
   });
 
   const overlays: StageOverlay[] = [];

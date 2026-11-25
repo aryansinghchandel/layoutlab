@@ -29,6 +29,7 @@ import {
 } from './nativeCanvasRenderer';
 import {
   buildMasterAudioSchedule,
+  buildSfxDurationMap,
   encodeAudioBufferToWavBlob,
   renderMasterAudioMixToBuffer,
 } from './soundEngine';
@@ -392,28 +393,43 @@ export async function exportAudioStemWav(params: {
   messages: ChatMessage[];
   config: RenderConfig;
   speed: PlaybackSpeed;
+  readingPacing?: number;
+  autoCameraMotion?: boolean;
+  emojiBurstEnabled?: boolean;
   soundBank: SoundBankFile[];
   backgroundLoop: BackgroundLoopConfig;
   masterMuted?: boolean;
+  masterVolume?: number;
 }): Promise<{ eventCount: number; hasBackground: boolean; durationSec: number }> {
   const {
     messages,
     config,
     speed,
+    readingPacing = 1.0,
+    autoCameraMotion = true,
+    emojiBurstEnabled = true,
     soundBank,
     backgroundLoop,
     masterMuted = false,
+    masterVolume = 1.0,
   } = params;
 
   if (messages.length === 0) {
     throw new Error('Add at least one message before exporting a WAV audio stem.');
   }
 
+  const sfxDurationsMs = buildSfxDurationMap(messages, soundBank);
   const timeline = buildAnimationTimeline(
     messages,
     speed,
     config.showBottomBar,
-    { includeFinalHold: true }
+    {
+      includeFinalHold: true,
+      readingPacing,
+      autoCameraMotion,
+      emojiBurstEnabled,
+      sfxDurationsMs,
+    }
   );
 
   const schedule = buildMasterAudioSchedule({
@@ -424,6 +440,7 @@ export async function exportAudioStemWav(params: {
     soundBank,
     backgroundLoop,
     masterMuted,
+    masterVolume,
   });
 
   if (schedule.events.length === 0 && !schedule.backgroundFile) {
@@ -455,24 +472,32 @@ export function startNativeAnimationExport(params: {
   messages: ChatMessage[];
   config: RenderConfig;
   speed: PlaybackSpeed;
+  readingPacing?: number;
+  autoCameraMotion?: boolean;
+  emojiBurstEnabled?: boolean;
   quality: VideoQuality;
   format: AnimationFormat;
   audioMode?: VideoAudioMode;
   soundBank?: SoundBankFile[];
   backgroundLoop?: BackgroundLoopConfig;
   masterAudioMuted?: boolean;
+  masterAudioVolume?: number;
   onProgress: (info: ExportProgressInfo) => void;
 }): AnimationExportController {
   const {
     messages,
     config,
     speed,
+    readingPacing = 1.0,
+    autoCameraMotion = true,
+    emojiBurstEnabled = true,
     quality,
     format,
     audioMode = 'baked',
     soundBank = [],
     backgroundLoop,
     masterAudioMuted = false,
+    masterAudioVolume = 1.0,
     onProgress,
   } = params;
   let cancelled = false;
@@ -586,10 +611,18 @@ export function startNativeAnimationExport(params: {
         return;
       }
 
+      const sfxDurationsMs = buildSfxDurationMap(messages, soundBank);
       const timeline = buildAnimationTimeline(
         messages,
         speed,
-        config.showBottomBar
+        config.showBottomBar,
+        {
+          includeFinalHold: true,
+          readingPacing,
+          autoCameraMotion,
+          emojiBurstEnabled,
+          sfxDurationsMs,
+        }
       );
       const scrollState: ScrollState = { y: 0 };
       const frameDelayMs = 40; // Smooth deterministic 25 FPS GIF
@@ -685,10 +718,18 @@ export function startNativeAnimationExport(params: {
     canvas.width = pixelWidth;
     canvas.height = pixelHeight;
 
+    const sfxDurationsMs = buildSfxDurationMap(messages, soundBank);
     const timeline = buildAnimationTimeline(
       messages,
       speed,
-      config.showBottomBar
+      config.showBottomBar,
+      {
+        includeFinalHold: true,
+        readingPacing,
+        autoCameraMotion,
+        emojiBurstEnabled,
+        sfxDurationsMs,
+      }
     );
     const scrollState: ScrollState = { y: 0 };
     const totalFrames = Math.max(
@@ -698,7 +739,7 @@ export function startNativeAnimationExport(params: {
 
     // Offline render synced audio mix (Background Loop + typing SFX + per-line SFX + GIF overlay SFX)
     let renderedAudioBuffer: AudioBuffer | null = null;
-    if (audioMode === 'baked' && !masterAudioMuted) {
+    if (audioMode === 'baked' && !masterAudioMuted && masterAudioVolume > 0) {
       const schedule = buildMasterAudioSchedule({
         timeline,
         messages,
@@ -707,6 +748,7 @@ export function startNativeAnimationExport(params: {
         soundBank,
         backgroundLoop: backgroundLoop ?? DEFAULT_BACKGROUND_LOOP,
         masterMuted: masterAudioMuted,
+        masterVolume: masterAudioVolume,
       });
       if (schedule.events.length > 0 || schedule.backgroundFile) {
         renderedAudioBuffer = await renderMasterAudioMixToBuffer(

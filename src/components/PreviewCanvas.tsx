@@ -11,8 +11,10 @@ import {
   X,
 } from 'lucide-react';
 import {
+  type ActiveEmojiBurst,
   type ActiveVisualEffect,
   type AiSkin,
+  type CameraTransform,
   type ChatMessage,
   type CustomAiIconId,
   type DeviceMode,
@@ -27,6 +29,7 @@ import {
   type ThinkingSenderInfo,
 } from '../types';
 import { renderChatGptMarkdown } from '../utils/markdown';
+import { lerpHexColor } from '../utils/nativeCanvasRenderer';
 import {
   evaluateOverlayVisibility,
   getOverlayFontStack,
@@ -112,6 +115,8 @@ interface PreviewCanvasProps {
   onDuplicateOverlay?: (id: string) => void;
   onDeleteOverlay?: (id: string) => void;
   activeVisualEffect?: ActiveVisualEffect | null;
+  cameraTransform?: CameraTransform | null;
+  activeEmojiBurst?: ActiveEmojiBurst | null;
   soundBank?: SoundBankFile[];
   onAuditionSoundFile?: (fileId: string, volume?: number) => void;
 }
@@ -582,6 +587,7 @@ interface MemoizedMessageRowProps {
   enableThoughtPill: boolean;
   isPlaying: boolean;
   isStreamingThis: boolean;
+  activeEmojiBurst?: ActiveEmojiBurst | null;
   palette: SkinPalette;
 }
 
@@ -606,6 +612,7 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
   enableThoughtPill,
   isPlaying,
   isStreamingThis,
+  activeEmojiBurst,
   palette,
 }: MemoizedMessageRowProps) {
   const userFontSizePx = cleanFontSize - 2;
@@ -775,9 +782,13 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
         )
       : null;
 
+  const burstSize = isClean16x9 ? 62 : 42;
+  const burstFontSize = isClean16x9 ? 40 : 26;
+
   return (
     <div
       style={{
+        position: 'relative',
         display: 'flex',
         alignItems: 'flex-start',
         gap: isClean16x9 ? '18px' : isMobile ? '12px' : '16px',
@@ -844,6 +855,46 @@ const MemoizedMessageRow = React.memo(function MemoizedMessageRow({
           />
         )}
       </div>
+
+      {/* Pop-Up Reaction Emoji Burst synced with dramatic SFX completion */}
+      {activeEmojiBurst && activeEmojiBurst.opacity > 0.01 && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            right: '4px',
+            top: isClean16x9 ? '17px' : '9px',
+            width: `${burstSize}px`,
+            height: `${burstSize}px`,
+            borderRadius: '9999px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: isDark
+              ? 'rgba(28, 28, 32, 0.92)'
+              : 'rgba(255, 255, 255, 0.96)',
+            border: isDark
+              ? `${isClean16x9 ? '1.5px' : '1px'} solid rgba(255, 255, 255, 0.16)`
+              : `${isClean16x9 ? '1.5px' : '1px'} solid rgba(15, 23, 42, 0.10)`,
+            boxShadow: isClean16x9
+              ? '0 6px 18px rgba(0, 0, 0, 0.32)'
+              : '0 4px 12px rgba(0, 0, 0, 0.32)',
+            fontSize: `${burstFontSize}px`,
+            lineHeight: 1,
+            opacity: Math.max(0, Math.min(1, activeEmojiBurst.opacity)),
+            transform: `translate3d(0, ${activeEmojiBurst.offsetY.toFixed(
+              1
+            )}px, 0) rotate(${activeEmojiBurst.rotationDeg.toFixed(
+              1
+            )}deg) scale(${activeEmojiBurst.scale.toFixed(3)})`,
+            pointerEvents: 'none',
+            zIndex: 12,
+            userSelect: 'none',
+          }}
+        >
+          {activeEmojiBurst.emoji}
+        </div>
+      )}
     </div>
   );
 });
@@ -954,6 +1005,8 @@ export function PreviewCanvas({
   onDuplicateOverlay,
   onDeleteOverlay,
   activeVisualEffect = null,
+  cameraTransform = null,
+  activeEmojiBurst = null,
   soundBank = [],
   onAuditionSoundFile,
 }: PreviewCanvasProps) {
@@ -1189,6 +1242,21 @@ export function PreviewCanvas({
   const useTwoRowComposer =
     !isClean16x9 && (skin === 'claude' || skin === 'grok');
   const mdLineHeight = cleanFontSize >= 32 ? 1.3 : 1.38;
+  const hasCameraMotion = Boolean(
+    cameraTransform &&
+      (Math.abs(cameraTransform.scale - 1) > 0.0005 ||
+        Math.abs(cameraTransform.offsetX) > 0.05 ||
+        Math.abs(cameraTransform.offsetY) > 0.05)
+  );
+  const cameraOffsetScale = isClean16x9 ? stageScale : 1;
+  const redTintAmount =
+    activeVisualEffect?.type === 'red_flash'
+      ? Math.min(1, activeVisualEffect.intensity * 1.15)
+      : 0;
+  const effectiveCanvasBg =
+    redTintAmount > 0.005
+      ? lerpHexColor(palette.canvasBg, '#3b0404', redTintAmount)
+      : palette.canvasBg;
 
   return (
     <main
@@ -1346,14 +1414,14 @@ export function PreviewCanvas({
             style={{
               position: 'relative',
               width: '100%',
-              backgroundColor: palette.canvasBg,
+              backgroundColor: effectiveCanvasBg,
               color: palette.textPrimary,
               display: 'flex',
               flexDirection: 'row',
+              overflow: 'hidden',
               ...(isClean16x9
                 ? {
                     aspectRatio: '16 / 9',
-                    overflow: 'hidden',
                   }
                 : {
                     minHeight: lockedMinHeight
@@ -1365,6 +1433,34 @@ export function PreviewCanvas({
               boxSizing: 'border-box',
             }}
           >
+            {/* Camera Motion Viewport Wrapper (synced pixel-for-pixel with nativeCanvasRenderer.ts) */}
+            <div
+              style={{
+                position: 'relative',
+                display: 'flex',
+                flexDirection: 'row',
+                width: '100%',
+                flex: 1,
+                minWidth: 0,
+                minHeight: '100%',
+                transformOrigin: `${(
+                  (cameraTransform?.originX ?? 0.5) * 100
+                ).toFixed(1)}% ${(
+                  (cameraTransform?.originY ?? 0.5) * 100
+                ).toFixed(1)}%`,
+                transform:
+                  hasCameraMotion && cameraTransform
+                    ? `translate3d(${(
+                        cameraTransform.offsetX * cameraOffsetScale
+                      ).toFixed(2)}px, ${(
+                        cameraTransform.offsetY * cameraOffsetScale
+                      ).toFixed(2)}px, 0) scale(${cameraTransform.scale.toFixed(
+                        4
+                      )})`
+                    : undefined,
+                willChange: hasCameraMotion ? 'transform' : undefined,
+              }}
+            >
             {/* Optional In-Frame Sidebar */}
             {showSidebar && !isMobile && (
               <InFrameSidebar palette={palette} skin={skin} />
@@ -1749,6 +1845,12 @@ export function PreviewCanvas({
                             (isPlaying || scrubTimeSec !== null) &&
                             streamingMessageId === msg.id
                           }
+                          activeEmojiBurst={
+                            activeEmojiBurst &&
+                            activeEmojiBurst.messageId === msg.id
+                              ? activeEmojiBurst
+                              : null
+                          }
                           palette={palette}
                         />
                       ))}
@@ -1799,8 +1901,8 @@ export function PreviewCanvas({
                               <span
                                 className={
                                   isClean16x9
-                                    ? 'chatgpt-thinking-dot clean16x9-dot'
-                                    : 'chatgpt-thinking-dot'
+                                    ? 'chatgpt-thinking-dots clean16x9-dots'
+                                    : 'chatgpt-thinking-dots'
                                 }
                                 style={{
                                   color:
@@ -1809,7 +1911,21 @@ export function PreviewCanvas({
                                       : palette.textPrimary,
                                 }}
                                 aria-label={`${skinMeta.name} is thinking`}
-                              />
+                              >
+                                {[0, 1, 2].map((dotIdx) => (
+                                  <span
+                                    key={dotIdx}
+                                    className={
+                                      isClean16x9
+                                        ? 'chatgpt-thinking-dot clean16x9-dot'
+                                        : 'chatgpt-thinking-dot'
+                                    }
+                                    style={{
+                                      animationDelay: `${dotIdx * 150}ms`,
+                                    }}
+                                  />
+                                ))}
+                              </span>
                             </div>
                           );
                         })()}
@@ -1838,7 +1954,7 @@ export function PreviewCanvas({
                           : '4px 24px 24px 24px',
                     boxSizing: 'border-box',
                     flexShrink: 0,
-                    backgroundColor: palette.canvasBg,
+                    backgroundColor: effectiveCanvasBg,
                     position: 'relative',
                     zIndex: 2,
                   }}
@@ -2131,7 +2247,7 @@ export function PreviewCanvas({
                         ? '2px 14px 12px'
                         : '2px 24px 14px',
                     flexShrink: 0,
-                    backgroundColor: palette.canvasBg,
+                    backgroundColor: effectiveCanvasBg,
                     position: 'relative',
                     zIndex: 2,
                   }}
@@ -2503,6 +2619,7 @@ export function PreviewCanvas({
                 })}
               </div>
             )}
+            </div>
 
             {/* Full-Frame Visual Effects Layer (red_flash & cut_to_black synced with Export) */}
             {activeVisualEffect && activeVisualEffect.intensity > 0.005 && (

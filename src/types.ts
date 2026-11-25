@@ -27,10 +27,38 @@ export interface MessageAttachment {
 
 export type VisualEffectType = 'none' | 'red_flash' | 'cut_to_black';
 export type MessageCueKind = 'typing' | 'visual_effect' | 'hold';
+export type SfxPlaybackMode = 'hold_until_done' | 'duck_on_next' | 'cut_on_next';
 
 export interface ActiveVisualEffect {
   type: 'red_flash' | 'cut_to_black';
   intensity: number;
+}
+
+export interface CameraTransform {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  originX: number;
+  originY: number;
+}
+
+export const NEUTRAL_CAMERA_TRANSFORM: CameraTransform = {
+  scale: 1,
+  offsetX: 0,
+  offsetY: 0,
+  originX: 0.5,
+  originY: 0.5,
+};
+
+export interface ActiveEmojiBurst {
+  id: string;
+  messageId: string;
+  emoji: string;
+  progress: number;
+  scale: number;
+  opacity: number;
+  offsetY: number;
+  rotationDeg: number;
 }
 
 export interface ChatMessage {
@@ -59,6 +87,12 @@ export interface ChatMessage {
   sfxFileId?: string;
   sfxMuted?: boolean;
   sfxVolume?: number;
+  /** Per-line SFX time-shift nudge in milliseconds (-1000 to +1000) */
+  sfxOffsetMs?: number;
+  /** Controls how the timeline & audio handle this line's SFX tail: Hold (default), Duck, or Cut */
+  sfxMode?: SfxPlaybackMode;
+  /** Explicit [ZOOM] camera punch-in flag from script */
+  cameraZoom?: boolean;
 }
 
 export interface ThinkingSenderInfo {
@@ -147,6 +181,9 @@ export interface ScheduledAudioEvent {
   fileId: string;
   volume: number;
   maxDurationSec?: number;
+  duckAtMs?: number;
+  duckFadeMs?: number;
+  sfxMode?: SfxPlaybackMode;
   pitchRate?: number;
   isTyping?: boolean;
   sourceLabel?: string;
