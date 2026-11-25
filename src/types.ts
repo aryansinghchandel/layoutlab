@@ -26,7 +26,7 @@ export interface MessageAttachment {
 }
 
 export type VisualEffectType = 'none' | 'red_flash' | 'cut_to_black';
-export type MessageCueKind = 'typing' | 'visual_effect';
+export type MessageCueKind = 'typing' | 'visual_effect' | 'hold';
 
 export interface ActiveVisualEffect {
   type: 'red_flash' | 'cut_to_black';

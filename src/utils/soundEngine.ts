@@ -561,6 +561,9 @@ export function buildMasterAudioSchedule(params: {
     if (msg.cueKind === 'visual_effect') {
       const seg = msgSegs.find((s) => s.kind === 'visual_effect') ?? msgSegs[0];
       triggerTimeMs = seg.startMs;
+    } else if (msg.cueKind === 'hold') {
+      const seg = msgSegs.find((s) => s.kind === 'post_hold') ?? msgSegs[0];
+      triggerTimeMs = seg.startMs;
     } else if (msg.role === 'system') {
       const seg = msgSegs.find((s) => s.kind === 'system_enter') ?? msgSegs[0];
       triggerTimeMs = seg.startMs;

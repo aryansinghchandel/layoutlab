@@ -300,7 +300,7 @@ export function buildAnimationTimeline(
     return created;
   };
 
-  pushSegment(Math.round(180 / effectiveSpeed), { kind: 'idle', msgIndex: -1 });
+  pushSegment(Math.round(75 / effectiveSpeed), { kind: 'idle', msgIndex: -1 });
 
   messages.forEach((msg, index) => {
     const prevMsg = index > 0 ? messages[index - 1] : null;
@@ -309,6 +309,21 @@ export function buildAnimationTimeline(
       const holdMs = Math.max(200, Math.round((msg.holdDurationSec ?? 1.5) * 1000));
       pushSegment(holdMs, {
         kind: 'thinking',
+        msgIndex: index,
+      });
+      if (msg.postHoldSec && msg.postHoldSec > 0) {
+        pushSegment(Math.round(msg.postHoldSec * 1000), {
+          kind: 'post_hold',
+          msgIndex: index,
+        });
+      }
+      return;
+    }
+
+    if (msg.cueKind === 'hold') {
+      const holdMs = Math.max(150, Math.round((msg.holdDurationSec ?? 1.0) * 1000));
+      pushSegment(holdMs, {
+        kind: 'post_hold',
         msgIndex: index,
       });
       if (msg.postHoldSec && msg.postHoldSec > 0) {
@@ -351,7 +366,8 @@ export function buildAnimationTimeline(
       if (msg.visualEffect === 'red_flash') {
         redFlashWindows.push({ startMs: enterSeg.startMs, durationMs: 680 });
       }
-      pushSegment(Math.round((animate ? 380 : 320) / effectiveSpeed), {
+      // Snappy 150ms post-message gap at 1x speed (effectiveSpeed = 0.5)
+      pushSegment(Math.round(75 / effectiveSpeed), {
         kind: 'idle',
         msgIndex: index,
       });
@@ -394,7 +410,8 @@ export function buildAnimationTimeline(
       if (msg.visualEffect === 'red_flash') {
         redFlashWindows.push({ startMs: slideSeg.startMs, durationMs: 680 });
       }
-      pushSegment(Math.round(200 / effectiveSpeed), {
+      // Snappy 150ms post-message gap at 1x speed (effectiveSpeed = 0.5)
+      pushSegment(Math.round(75 / effectiveSpeed), {
         kind: 'idle',
         msgIndex: index,
       });
@@ -412,9 +429,10 @@ export function buildAnimationTimeline(
         });
       }
     } else {
-      // Skip redundant default thinking pause if immediately preceded by an explicit [TYPING...] cue
+      // Snappy 250ms default AI thinking pause at 1x speed (effectiveSpeed = 0.5);
+      // skipped when immediately preceded by an explicit [TYPING...] (Hold X sec) cue.
       if (prevMsg?.cueKind !== 'typing') {
-        pushSegment(Math.round(1000 / effectiveSpeed), {
+        pushSegment(Math.round(125 / effectiveSpeed), {
           kind: 'thinking',
           msgIndex: index,
         });
@@ -432,7 +450,8 @@ export function buildAnimationTimeline(
       if (msg.visualEffect === 'red_flash') {
         redFlashWindows.push({ startMs: triggerStartMs, durationMs: 680 });
       }
-      pushSegment(Math.round(420 / effectiveSpeed), {
+      // Snappy 150ms post-message gap at 1x speed (effectiveSpeed = 0.5)
+      pushSegment(Math.round(75 / effectiveSpeed), {
         kind: 'idle',
         msgIndex: index,
       });

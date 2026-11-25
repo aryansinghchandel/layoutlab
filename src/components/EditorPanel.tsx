@@ -1238,7 +1238,8 @@ export const EditorPanel = React.memo(function EditorPanel({
               {messages.map((msg, index) => {
                 const isTypingCue = msg.cueKind === 'typing';
                 const isVisualCue = msg.cueKind === 'visual_effect';
-                const isSpecialCue = isTypingCue || isVisualCue;
+                const isHoldCue = msg.cueKind === 'hold';
+                const isSpecialCue = isTypingCue || isVisualCue || isHoldCue;
                 const isUser = !isSpecialCue && msg.role === 'user';
                 const isSystem = !isSpecialCue && msg.role === 'system';
                 const isAssistant = !isSpecialCue && msg.role === 'assistant';
@@ -1265,9 +1266,11 @@ export const EditorPanel = React.memo(function EditorPanel({
                         ? 'border-red-200 bg-red-50/40'
                         : isTypingCue
                           ? 'border-amber-200 bg-amber-50/40'
-                          : isSystem
-                            ? 'border-slate-200 bg-slate-50/70'
-                            : 'border-slate-200 bg-white'
+                          : isHoldCue
+                            ? 'border-indigo-200 bg-indigo-50/40'
+                            : isSystem
+                              ? 'border-slate-200 bg-slate-50/70'
+                              : 'border-slate-200 bg-white'
                     }`}
                   >
                     {/* Card Header */}
@@ -1284,6 +1287,11 @@ export const EditorPanel = React.memo(function EditorPanel({
                           <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-100/70 px-2 py-0.5 text-[11px] font-semibold text-amber-900 whitespace-nowrap">
                             <Clock className="h-3 w-3" />
                             Typing Hold
+                          </span>
+                        ) : isHoldCue ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-100/70 px-2 py-0.5 text-[11px] font-semibold text-indigo-900 whitespace-nowrap">
+                            <Clock className="h-3 w-3" />
+                            Pause Hold
                           </span>
                         ) : isVisualCue ? (
                           <span className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-100/70 px-2 py-0.5 text-[11px] font-semibold text-red-900 whitespace-nowrap">
@@ -1781,6 +1789,32 @@ export const EditorPanel = React.memo(function EditorPanel({
                             className="h-7 w-16 rounded-md border border-slate-200 bg-slate-50 px-2 font-mono text-xs font-semibold text-slate-900 outline-none focus:border-slate-400"
                           />
                           <span className="text-slate-500">s</span>
+                        </label>
+                      </div>
+                    ) : isHoldCue ? (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-indigo-200/80 bg-white px-2.5 py-2">
+                        <span className="text-xs font-medium text-slate-600">
+                          Explicit pause before next line
+                        </span>
+                        <label className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700">
+                          <span>Hold</span>
+                          <input
+                            type="number"
+                            min={0.15}
+                            max={15}
+                            step={0.1}
+                            value={msg.holdDurationSec ?? 1.0}
+                            onChange={(e) =>
+                              onUpdateMessageMeta(msg.id, {
+                                holdDurationSec: Math.max(
+                                  0.15,
+                                  Math.min(15, Number(e.target.value) || 1.0)
+                                ),
+                              })
+                            }
+                            className="h-7 w-16 rounded-md border border-slate-200 bg-slate-50 px-2 font-mono text-xs font-semibold text-slate-900 outline-none focus:border-slate-400"
+                          />
+                          <span className="text-slate-500">sec</span>
                         </label>
                       </div>
                     ) : isSystem ? (

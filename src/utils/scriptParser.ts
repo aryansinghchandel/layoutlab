@@ -44,6 +44,12 @@ export interface ParsedScriptVisualItem {
   sfxCue?: string;
 }
 
+export interface ParsedScriptHoldItem {
+  kind: 'hold';
+  holdSec: number;
+  sfxCue?: string;
+}
+
 export interface ParsedScriptMessageItem {
   kind: 'message';
   role: 'user' | 'assistant' | 'system';
@@ -52,6 +58,7 @@ export interface ParsedScriptMessageItem {
   customSenderColor?: string;
   customSenderIcon?: ChatMessage['customSenderIcon'];
   content: string;
+  postHoldSec?: number;
   sfxCue?: string;
   visualEffect?: VisualEffectType;
 }
@@ -59,6 +66,7 @@ export interface ParsedScriptMessageItem {
 export type ParsedScriptItem =
   | ParsedScriptMessageItem
   | ParsedScriptTypingItem
+  | ParsedScriptHoldItem
   | ParsedScriptGifItem
   | ParsedScriptVisualItem;
 
@@ -98,14 +106,29 @@ function createScriptId(prefix: string, idx: number): string {
   return `${prefix}-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function parseHoldSeconds(text: string, fallbackSec: number): number {
+function extractExplicitHoldSeconds(text: string): number | null {
   const m = text.match(
-    /\(\s*(?:hold|pause|wait|duration)?\s*:?\s*(\d+(?:\.\d+)?)\s*(?:sec(?:onds?)?|s)\s*\)/i
+    /[\[(]\s*(?:hold|pause|wait|duration)\s*:?\s*(\d+(?:\.\d+)?)\s*(?:sec(?:onds?)?|s)\s*[\])]/i
   );
   if (m) {
     const val = parseFloat(m[1]);
     if (Number.isFinite(val) && val > 0) {
-      return Math.max(0.2, Math.min(15, val));
+      return Math.max(0.15, Math.min(15, val));
+    }
+  }
+  return null;
+}
+
+function parseHoldSeconds(text: string, fallbackSec: number): number {
+  const explicit = extractExplicitHoldSeconds(text);
+  if (explicit !== null) return explicit;
+  const m = text.match(
+    /[\[(]\s*(\d+(?:\.\d+)?)\s*(?:sec(?:onds?)?|s)\s*[\])]/i
+  );
+  if (m) {
+    const val = parseFloat(m[1]);
+    if (Number.isFinite(val) && val > 0) {
+      return Math.max(0.15, Math.min(15, val));
     }
   }
   return fallbackSec;
@@ -114,9 +137,10 @@ function parseHoldSeconds(text: string, fallbackSec: number): number {
 function stripHoldTags(text: string): string {
   return text
     .replace(
-      /\(\s*(?:hold|pause|wait|duration)\s*:?\s*\d+(?:\.\d+)?\s*(?:sec(?:onds?)?|s)\s*\)/gi,
+      /[\[(]\s*(?:hold|pause|wait|duration)\s*:?\s*\d+(?:\.\d+)?\s*(?:sec(?:onds?)?|s)\s*[\])]/gi,
       ''
     )
+    .replace(/\s{2,}/g, ' ')
     .trim();
 }
 
@@ -368,6 +392,17 @@ export function parseScriptText(rawScript: string): ParsedScriptResult {
       continue;
     }
 
+    // 5b. Standalone (Hold X sec) / (Pause X sec) / [Hold X sec] cue
+    const standaloneHoldSec = extractExplicitHoldSeconds(withoutVfx);
+    if (standaloneHoldSec !== null && !stripHoldTags(withoutVfx)) {
+      items.push({
+        kind: 'hold',
+        holdSec: standaloneHoldSec,
+        sfxCue: primarySfx,
+      });
+      continue;
+    }
+
     // 6. Speaker: Message line (ChatGPT:, Gemini:, Claude:, Grok:, You:, User:, System:, Custom:)
     const speakerMatch = withoutVfx.match(
       /^(?:\*\*([^*:\n]{1,30})\*\*|\[([^\]:\n]{1,30})\]|([A-Za-z0-9][A-Za-z0-9 _.-]{0,28}))\s*:\s*(.*)$/
@@ -382,9 +417,14 @@ export function parseScriptText(rawScript: string): ParsedScriptResult {
       let content = (speakerMatch[4] || '').trim();
       // Strip any stray inline [GIF] tag inside a chat line
       content = content.replace(/\[\s*GIF\s*\]/gi, '').trim();
+      // Extract & strip optional inline (Hold X sec) tag
+      const inlineHoldSec = extractExplicitHoldSeconds(content);
+      if (inlineHoldSec !== null) {
+        content = stripHoldTags(content);
+      }
 
       const resolved = resolveSpeaker(rawSpeaker, customColorIndex);
-      if (content || visualEffect !== 'none' || primarySfx) {
+      if (content || visualEffect !== 'none' || primarySfx || inlineHoldSec !== null) {
         items.push({
           kind: 'message',
           role: resolved.role,
@@ -393,6 +433,7 @@ export function parseScriptText(rawScript: string): ParsedScriptResult {
           customSenderColor: resolved.customSenderColor,
           customSenderIcon: resolved.customSenderIcon,
           content: content || ' ',
+          postHoldSec: inlineHoldSec ?? undefined,
           sfxCue: primarySfx,
           visualEffect: visualEffect !== 'none' ? visualEffect : undefined,
         });
@@ -402,10 +443,13 @@ export function parseScriptText(rawScript: string): ParsedScriptResult {
 
     // 7. System join/leave shorthand line (e.g. "ChatGPT joined the chat")
     if (/\b(?:joined|left|entered|removed from)\s+the\s+chat\b/i.test(withoutVfx)) {
+      const inlineHoldSec = extractExplicitHoldSeconds(withoutVfx);
+      const cleanSys = inlineHoldSec !== null ? stripHoldTags(withoutVfx) : withoutVfx;
       items.push({
         kind: 'message',
         role: 'system',
-        content: withoutVfx,
+        content: cleanSys,
+        postHoldSec: inlineHoldSec ?? undefined,
         sfxCue: primarySfx,
         visualEffect: visualEffect !== 'none' ? visualEffect : undefined,
       });
@@ -476,7 +520,7 @@ export function parseScriptText(rawScript: string): ParsedScriptResult {
       if (item.visualEffect && item.visualEffect !== 'none') {
         visualEffectCount += 1;
       }
-    } else if (item.kind === 'typing') {
+    } else if (item.kind === 'typing' || item.kind === 'hold') {
       typingCueCount += 1;
     } else if (item.kind === 'gif') {
       gifCount += 1;
@@ -558,6 +602,7 @@ export function autoBuildFromScript(
         thoughtDuration: item.role === 'assistant' ? '3s' : undefined,
         attachment: null,
         systemAnimate: item.role === 'system' ? true : undefined,
+        postHoldSec: item.postHoldSec,
         visualEffect: item.visualEffect,
         sfxCue: item.sfxCue,
         sfxFileId: item.sfxCue ? 'auto' : undefined,
@@ -575,6 +620,19 @@ export function autoBuildFromScript(
         customSenderName: item.speaker?.customSenderName,
         customSenderColor: item.speaker?.customSenderColor,
         customSenderIcon: item.speaker?.customSenderIcon,
+        holdDurationSec: item.holdSec,
+        sfxCue: item.sfxCue,
+        sfxFileId: item.sfxCue ? 'auto' : undefined,
+        sfxMuted: false,
+        sfxVolume: 0.9,
+      });
+    } else if (item.kind === 'hold') {
+      trackMatch(item.sfxCue);
+      messages.push({
+        id: createScriptId('hold', idx),
+        role: 'system',
+        cueKind: 'hold',
+        content: `(Hold ${item.holdSec}s)`,
         holdDurationSec: item.holdSec,
         sfxCue: item.sfxCue,
         sfxFileId: item.sfxCue ? 'auto' : undefined,
