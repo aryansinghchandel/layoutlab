@@ -10,6 +10,95 @@ import type { AnimationTimeline, TimelineSegment } from './nativeCanvasRenderer'
 
 const AUDIO_FILE_EXTENSIONS = /\.(mp3|wav|ogg|m4a|aac|flac|webm|opus)$/i;
 
+export const SYNTH_KEYCLICK_ID = '__synth_keyclick__';
+
+const synthKeyclickCache = new WeakMap<BaseAudioContext, AudioBuffer>();
+
+/**
+ * Generates a subtle, crisp mechanical/laptop keyclick AudioBuffer (~32ms)
+ * deterministically so Live Preview and Offline Export sound identical when
+ * no typing audio file is loaded in the Sound Bank.
+ */
+export function getSynthKeyclickBuffer(ctx: BaseAudioContext): AudioBuffer {
+  const existing = synthKeyclickCache.get(ctx);
+  if (existing) return existing;
+
+  const sampleRate = ctx.sampleRate || 48000;
+  const durationSec = 0.034;
+  const length = Math.max(64, Math.floor(sampleRate * durationSec));
+  const buffer = ctx.createBuffer(1, length, sampleRate);
+  const data = buffer.getChannelData(0);
+
+  // Deterministic LCG PRNG for consistent transient texture across preview & export
+  let seed = 0x5f3759df;
+  const nextRand = () => {
+    seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
+    return (seed / 0xffffffff) * 2 - 1;
+  };
+
+  let lpState = 0;
+  let hpPrev = 0;
+  for (let i = 0; i < length; i++) {
+    const t = i / sampleRate;
+    const white = nextRand();
+
+    // Soft bandpass-shaped click burst (fast 5ms transient)
+    lpState = lpState + 0.42 * (white - lpState);
+    const bp = lpState - hpPrev * 0.65;
+    hpPrev = lpState;
+
+    const attackEnv = Math.min(1, t / 0.0009);
+    const clickEnv = Math.exp(-t / 0.0042);
+    const bodyEnv = Math.exp(-t / 0.011);
+
+    const tactileSnap = Math.sin(2 * Math.PI * 1950 * t) * clickEnv * 0.24;
+    const keyThock = Math.sin(2 * Math.PI * 240 * t) * bodyEnv * 0.22;
+    const noiseTick = bp * clickEnv * 0.42;
+
+    const tailFade =
+      i > length - 120 ? Math.max(0, (length - i) / 120) : 1;
+
+    data[i] =
+      Math.max(-0.95, Math.min(0.95, (tactileSnap + keyThock + noiseTick) * attackEnv * tailFade)) *
+      0.55;
+  }
+
+  synthKeyclickCache.set(ctx, buffer);
+  return buffer;
+}
+
+export function findFallbackTypingFile(
+  soundBank: SoundBankFile[]
+): SoundBankFile | null {
+  if (soundBank.length === 0) return null;
+
+  let best: SoundBankFile | null = null;
+  let bestScore = 0;
+
+  for (const file of soundBank) {
+    const norm = file.normalized;
+    const compact = file.compact;
+    let score = 0;
+
+    if (/\b(keyboard|typing|typewriter|keystroke|keyclick)\b/.test(norm)) {
+      score = 100;
+    } else if (compact.includes('keyboard') || compact.includes('typing')) {
+      score = 95;
+    } else if (/\b(type|key|keys|clack)\b/.test(norm)) {
+      score = 80;
+    } else if (compact.includes('type') || compact.includes('key')) {
+      score = 70;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = file;
+    }
+  }
+
+  return best;
+}
+
 export function stripFileExtension(filename: string): string {
   return filename.replace(/\.[^/.]+$/, '');
 }
@@ -236,12 +325,90 @@ export interface MasterAudioSchedule {
   backgroundFile: SoundBankFile | null;
   backgroundVolume: number;
   blackoutRangesMs: Array<{ startMs: number; endMs: number }>;
+  typingWindowsMs: Array<{ startMs: number; endMs: number }>;
   totalDurationMs: number;
 }
 
 function isTypingSoundCue(cue: string | undefined): boolean {
   if (!cue) return false;
-  return /\b(type|typing|keyboard|keystroke|keys|clack)\b/i.test(cue);
+  return /\b(type|typing|keyboard|keystroke|keyclick|keys?|clack)\b/i.test(cue);
+}
+
+function scheduleTypingSpan(params: {
+  events: ScheduledAudioEvent[];
+  typingWindowsMs: Array<{ startMs: number; endMs: number }>;
+  idPrefix: string;
+  startMs: number;
+  endMs: number;
+  typingFile: SoundBankFile | null;
+  volume: number;
+  seed: number;
+  sourceLabel: string;
+}): void {
+  const {
+    events,
+    typingWindowsMs,
+    idPrefix,
+    startMs,
+    endMs,
+    typingFile,
+    volume,
+    seed,
+    sourceLabel,
+  } = params;
+
+  const spanMs = endMs - startMs;
+  if (spanMs < 35 || volume <= 0) return;
+
+  typingWindowsMs.push({ startMs, endMs });
+
+  // Continuous multi-stroke typing recording (> 0.45s): tile cleanly across the span and hard-stop at endMs
+  if (typingFile && typingFile.durationSec > 0.45) {
+    const stepMs = Math.max(240, Math.floor((typingFile.durationSec - 0.04) * 1000));
+    let cursorMs = startMs;
+    let sliceIdx = 0;
+    while (cursorMs < endMs - 20) {
+      const remainingSec = Math.max(0.02, (endMs - cursorMs) / 1000);
+      events.push({
+        id: `${idPrefix}-loop-${sliceIdx}`,
+        timeMs: cursorMs,
+        fileId: typingFile.id,
+        volume,
+        maxDurationSec: remainingSec,
+        isTyping: true,
+        sourceLabel,
+      });
+      cursorMs += stepMs;
+      sliceIdx += 1;
+    }
+    return;
+  }
+
+  // Short single keyclick sample (<= 0.45s) OR subtle synthesized keyclick fallback:
+  // fire repeated keystrokes at deterministic ~90–120ms intervals, strictly stopping at endMs.
+  const fileId = typingFile ? typingFile.id : SYNTH_KEYCLICK_ID;
+  let hitMs = startMs;
+  let step = 0;
+  while (hitMs < endMs - 20) {
+    const remainingSec = Math.max(0.02, (endMs - hitMs) / 1000);
+    const maxDur = typingFile
+      ? Math.min(typingFile.durationSec, remainingSec)
+      : Math.min(0.04, remainingSec);
+    const pitchRate = 0.95 + (((step * 13 + seed * 7) % 11) / 100);
+    events.push({
+      id: `${idPrefix}-key-${step}`,
+      timeMs: hitMs,
+      fileId,
+      volume,
+      maxDurationSec: Math.max(0.015, maxDur),
+      pitchRate,
+      isTyping: true,
+      sourceLabel,
+    });
+    const intervalMs = 90 + ((step * 17 + seed * 11) % 31); // 90..120ms deterministic rhythm
+    hitMs += intervalMs;
+    step += 1;
+  }
 }
 
 export function buildMasterAudioSchedule(params: {
@@ -263,18 +430,21 @@ export function buildMasterAudioSchedule(params: {
     masterMuted = false,
   } = params;
 
-  if (masterMuted || soundBank.length === 0) {
+  if (masterMuted) {
     return {
       events: [],
       backgroundFile: null,
       backgroundVolume: 0,
       blackoutRangesMs: [],
+      typingWindowsMs: [],
       totalDurationMs: timeline.totalDurationMs,
     };
   }
 
   const events: ScheduledAudioEvent[] = [];
   const blackoutRangesMs: Array<{ startMs: number; endMs: number }> = [];
+  const typingWindowsMs: Array<{ startMs: number; endMs: number }> = [];
+  const fallbackTypingFile = findFallbackTypingFile(soundBank);
 
   // Index segments by message index for exact trigger lookup
   const segsByMsg = new Map<number, TimelineSegment[]>();
@@ -289,9 +459,94 @@ export function buildMasterAudioSchedule(params: {
     }
   }
 
-  // 1. Per-line SFX from ChatMessage items
+  // 1. Per-line SFX + User Typing / [TYPING...] SFX from ChatMessage items
   messages.forEach((msg, idx) => {
     if (msg.sfxMuted) return;
+
+    const msgSegs = segsByMsg.get(idx) ?? [];
+    if (msgSegs.length === 0) return;
+
+    // 1a. Explicit [TYPING...] (Hold X sec) cue
+    if (msg.cueKind === 'typing') {
+      if (msg.sfxFileId === 'none') return;
+      const seg = msgSegs.find((s) => s.kind === 'thinking') ?? msgSegs[0];
+      const assignedFile = resolveSfxFile(msg.sfxCue, msg.sfxFileId, soundBank);
+      const typingFile = assignedFile ?? fallbackTypingFile;
+      scheduleTypingSpan({
+        events,
+        typingWindowsMs,
+        idPrefix: `ev-typecue-${msg.id}`,
+        startMs: seg.startMs,
+        endMs: seg.endMs,
+        typingFile,
+        volume: Math.max(0, Math.min(1.5, msg.sfxVolume ?? (typingFile ? 0.85 : 0.7))),
+        seed: idx + 1,
+        sourceLabel: msg.sfxCue || typingFile?.baseName || 'Synthesized Keyclick',
+      });
+      return;
+    }
+
+    // 1b. Regular user message: always play typing SFX during user_typing phase
+    // and stop cleanly at user_typing end before user_slide / send pop!
+    if (msg.role === 'user' && !msg.cueKind) {
+      const typeSeg = msgSegs.find((s) => s.kind === 'user_typing');
+      const hasExplicitLineSfx =
+        Boolean(msg.sfxCue?.trim()) ||
+        (Boolean(msg.sfxFileId) &&
+          msg.sfxFileId !== 'auto' &&
+          msg.sfxFileId !== 'none');
+      const resolvedLineFile = hasExplicitLineSfx
+        ? resolveSfxFile(msg.sfxCue, msg.sfxFileId, soundBank)
+        : null;
+      const lineIsTypingSfx =
+        isTypingSoundCue(msg.sfxCue) ||
+        Boolean(resolvedLineFile && isTypingSoundCue(resolvedLineFile.normalized));
+
+      if (typeSeg) {
+        const typingFile = lineIsTypingSfx
+          ? (resolvedLineFile ?? fallbackTypingFile)
+          : fallbackTypingFile;
+        const typingVol = lineIsTypingSfx
+          ? Math.max(0, Math.min(1.5, msg.sfxVolume ?? 0.85))
+          : typingFile
+            ? 0.55
+            : 0.65;
+        scheduleTypingSpan({
+          events,
+          typingWindowsMs,
+          idPrefix: `ev-utype-${msg.id}`,
+          startMs: typeSeg.startMs,
+          endMs: typeSeg.endMs,
+          typingFile,
+          volume: typingVol,
+          seed: idx + 3,
+          sourceLabel:
+            (lineIsTypingSfx ? msg.sfxCue : undefined) ||
+            typingFile?.baseName ||
+            'Synthesized Keyclick',
+        });
+      }
+
+      // Schedule non-typing send SFX (e.g. [SFX: iMessage Pop]) right when the message sends!
+      if (!lineIsTypingSfx && resolvedLineFile) {
+        const slideSeg =
+          msgSegs.find((s) => s.kind === 'user_slide') ??
+          msgSegs.find((s) => s.kind === 'user_send_highlight') ??
+          msgSegs[0];
+        events.push({
+          id: `ev-msg-${msg.id}`,
+          timeMs: Math.max(0, Math.min(timeline.totalDurationMs, slideSeg.startMs)),
+          fileId: resolvedLineFile.id,
+          volume: Math.max(0, Math.min(1.5, msg.sfxVolume ?? 0.9)),
+          sourceLabel: msg.sfxCue || resolvedLineFile.baseName,
+        });
+      }
+      return;
+    }
+
+    // 1c. Visual effects, system events, and assistant replies
+    if (soundBank.length === 0) return;
+
     const hasCueOrManual =
       Boolean(msg.sfxCue?.trim()) ||
       (Boolean(msg.sfxFileId) &&
@@ -302,37 +557,13 @@ export function buildMasterAudioSchedule(params: {
     const file = resolveSfxFile(msg.sfxCue, msg.sfxFileId, soundBank);
     if (!file) return;
 
-    const msgSegs = segsByMsg.get(idx) ?? [];
-    if (msgSegs.length === 0) return;
-
     let triggerTimeMs: number | null = null;
-    let maxDurationSec: number | undefined;
-
-    if (msg.cueKind === 'typing') {
-      const seg = msgSegs.find((s) => s.kind === 'thinking') ?? msgSegs[0];
-      triggerTimeMs = seg.startMs;
-      maxDurationSec = Math.max(0.25, (seg.endMs - seg.startMs) / 1000);
-    } else if (msg.cueKind === 'visual_effect') {
+    if (msg.cueKind === 'visual_effect') {
       const seg = msgSegs.find((s) => s.kind === 'visual_effect') ?? msgSegs[0];
       triggerTimeMs = seg.startMs;
     } else if (msg.role === 'system') {
       const seg = msgSegs.find((s) => s.kind === 'system_enter') ?? msgSegs[0];
       triggerTimeMs = seg.startMs;
-    } else if (msg.role === 'user') {
-      if (isTypingSoundCue(msg.sfxCue)) {
-        const typeSeg = msgSegs.find((s) => s.kind === 'user_typing');
-        if (typeSeg) {
-          triggerTimeMs = typeSeg.startMs;
-          maxDurationSec = Math.max(0.25, (typeSeg.endMs - typeSeg.startMs) / 1000);
-        }
-      }
-      if (triggerTimeMs === null) {
-        const slideSeg =
-          msgSegs.find((s) => s.kind === 'user_slide') ??
-          msgSegs.find((s) => s.kind === 'user_send_highlight') ??
-          msgSegs[0];
-        triggerTimeMs = slideSeg.startMs;
-      }
     } else {
       // Assistant message: fire right when the reply begins appearing
       const streamSeg =
@@ -348,14 +579,13 @@ export function buildMasterAudioSchedule(params: {
         timeMs: Math.max(0, Math.min(timeline.totalDurationMs, triggerTimeMs)),
         fileId: file.id,
         volume: Math.max(0, Math.min(1.5, msg.sfxVolume ?? 0.9)),
-        maxDurationSec,
         sourceLabel: msg.sfxCue || file.baseName,
       });
     }
   });
 
   // 2. Timed 16:9 Overlay / GIF Placeholder SFX
-  if (previewMode === 'clean16x9') {
+  if (previewMode === 'clean16x9' && soundBank.length > 0) {
     for (const ov of overlays) {
       if (ov.sfxMuted) continue;
       const hasCueOrManual =
@@ -387,7 +617,12 @@ export function buildMasterAudioSchedule(params: {
   // 3. Background Loop Track
   let backgroundFile: SoundBankFile | null = null;
   let backgroundVolume = 0;
-  if (backgroundLoop.enabled && !backgroundLoop.muted && backgroundLoop.volume > 0) {
+  if (
+    soundBank.length > 0 &&
+    backgroundLoop.enabled &&
+    !backgroundLoop.muted &&
+    backgroundLoop.volume > 0
+  ) {
     backgroundFile = resolveSfxFile(
       backgroundLoop.cueName,
       backgroundLoop.selectedFileId,
@@ -403,6 +638,7 @@ export function buildMasterAudioSchedule(params: {
     backgroundFile,
     backgroundVolume,
     blackoutRangesMs,
+    typingWindowsMs,
     totalDurationMs: timeline.totalDurationMs,
   };
 }
@@ -471,16 +707,31 @@ export async function renderMasterAudioMixToBuffer(
     bgSrc.stop(durationSec);
   }
 
-  // 2. Per-Line & Overlay One-Shot SFX Events
+  // 2. Per-Line, Typing, & Overlay One-Shot SFX Events
+  let cachedSynthBuffer: AudioBuffer | null = null;
   for (const ev of schedule.events) {
-    const file = fileMap.get(ev.fileId);
-    if (!file || ev.volume <= 0) continue;
+    if (ev.volume <= 0) continue;
+
+    let audioBuffer: AudioBuffer | null = null;
+    if (ev.fileId === SYNTH_KEYCLICK_ID) {
+      if (!cachedSynthBuffer) {
+        cachedSynthBuffer = getSynthKeyclickBuffer(offline);
+      }
+      audioBuffer = cachedSynthBuffer;
+    } else {
+      audioBuffer = fileMap.get(ev.fileId)?.buffer ?? null;
+    }
+    if (!audioBuffer) continue;
 
     const startSec = Math.max(0, ev.timeMs / 1000);
     if (startSec >= durationSec) continue;
 
     const src = offline.createBufferSource();
-    src.buffer = file.buffer;
+    src.buffer = audioBuffer;
+    const rate = ev.pitchRate && ev.pitchRate > 0 ? ev.pitchRate : 1;
+    if (rate !== 1) {
+      src.playbackRate.setValueAtTime(rate, startSec);
+    }
 
     const gain = offline.createGain();
     gain.gain.setValueAtTime(ev.volume, startSec);
@@ -488,15 +739,20 @@ export async function renderMasterAudioMixToBuffer(
     src.connect(gain);
     gain.connect(masterBus);
 
+    const effectiveBufferDur = audioBuffer.duration / rate;
     const maxClipDur = ev.maxDurationSec
       ? Math.min(ev.maxDurationSec, durationSec - startSec)
       : durationSec - startSec;
 
-    if (ev.maxDurationSec && file.durationSec > maxClipDur) {
-      const fadeStart = Math.max(startSec, startSec + maxClipDur - 0.04);
+    if (ev.maxDurationSec && (effectiveBufferDur > maxClipDur || ev.isTyping)) {
+      const clampedDur = Math.max(0.015, Math.min(effectiveBufferDur, maxClipDur));
+      const fadeLen = ev.isTyping
+        ? Math.min(0.015, clampedDur * 0.35)
+        : Math.min(0.04, clampedDur * 0.35);
+      const fadeStart = Math.max(startSec, startSec + clampedDur - fadeLen);
       gain.gain.setValueAtTime(ev.volume, fadeStart);
-      gain.gain.linearRampToValueAtTime(0.0001, startSec + maxClipDur);
-      src.start(startSec, 0, Math.max(0.02, maxClipDur));
+      gain.gain.linearRampToValueAtTime(0.0001, startSec + clampedDur);
+      src.start(startSec, 0, Math.max(0.015, clampedDur * rate));
     } else {
       src.start(startSec);
     }
@@ -565,6 +821,7 @@ export function encodeAudioBufferToWavBlob(buffer: AudioBuffer): Blob {
 export class LiveAudioEngine {
   private ctx: AudioContext | null = null;
   private activeSources = new Set<AudioBufferSourceNode>();
+  private activeTypingSources = new Set<AudioBufferSourceNode>();
   private bgSource: AudioBufferSourceNode | null = null;
   private bgGain: GainNode | null = null;
   private bgBaseVolume = 0.11;
@@ -581,6 +838,10 @@ export class LiveAudioEngine {
       this.ctx = new AudioCtx();
     }
     return this.ctx;
+  }
+
+  getSynthKeyclickBuffer(): AudioBuffer {
+    return getSynthKeyclickBuffer(this.ensureContext());
   }
 
   unlock(): void {
@@ -677,7 +938,12 @@ export class LiveAudioEngine {
   playOneShot(
     buffer: AudioBuffer,
     volume: number,
-    options?: { delaySec?: number; maxDurationSec?: number }
+    options?: {
+      delaySec?: number;
+      maxDurationSec?: number;
+      pitchRate?: number;
+      isTyping?: boolean;
+    }
   ): void {
     try {
       const ctx = this.ensureContext();
@@ -687,17 +953,27 @@ export class LiveAudioEngine {
       const src = ctx.createBufferSource();
       src.buffer = buffer;
 
+      const rate =
+        options?.pitchRate && options.pitchRate > 0 ? options.pitchRate : 1;
+      const startTime = ctx.currentTime + Math.max(0, options?.delaySec ?? 0);
+      if (rate !== 1) {
+        src.playbackRate.setValueAtTime(rate, startTime);
+      }
+
       const gain = ctx.createGain();
       const clampedVol = Math.max(0, Math.min(1.5, volume));
-      const startTime = ctx.currentTime + Math.max(0, options?.delaySec ?? 0);
       gain.gain.setValueAtTime(clampedVol, startTime);
 
       src.connect(gain);
       gain.connect(ctx.destination);
 
       this.activeSources.add(src);
+      if (options?.isTyping) {
+        this.activeTypingSources.add(src);
+      }
       src.onended = () => {
         this.activeSources.delete(src);
+        this.activeTypingSources.delete(src);
         try {
           src.disconnect();
           gain.disconnect();
@@ -707,11 +983,16 @@ export class LiveAudioEngine {
       };
 
       const maxDur = options?.maxDurationSec;
-      if (maxDur && maxDur > 0 && buffer.duration > maxDur) {
-        const fadeStart = Math.max(startTime, startTime + maxDur - 0.04);
+      const effectiveDur = buffer.duration / rate;
+      if (maxDur && maxDur > 0 && (effectiveDur > maxDur || options?.isTyping)) {
+        const clampedDur = Math.max(0.015, Math.min(effectiveDur, maxDur));
+        const fadeLen = options?.isTyping
+          ? Math.min(0.015, clampedDur * 0.35)
+          : Math.min(0.04, clampedDur * 0.35);
+        const fadeStart = Math.max(startTime, startTime + clampedDur - fadeLen);
         gain.gain.setValueAtTime(clampedVol, fadeStart);
-        gain.gain.linearRampToValueAtTime(0.0001, startTime + maxDur);
-        src.start(startTime, 0, Math.max(0.02, maxDur));
+        gain.gain.linearRampToValueAtTime(0.0001, startTime + clampedDur);
+        src.start(startTime, 0, Math.max(0.015, clampedDur * rate));
       } else {
         src.start(startTime);
       }
@@ -720,8 +1001,22 @@ export class LiveAudioEngine {
     }
   }
 
+  stopTypingSources(): void {
+    for (const src of Array.from(this.activeTypingSources)) {
+      try {
+        src.stop();
+        src.disconnect();
+      } catch {
+        // Already stopped
+      }
+      this.activeSources.delete(src);
+    }
+    this.activeTypingSources.clear();
+  }
+
   stopAll(): void {
     this.stopBackgroundLoop();
+    this.activeTypingSources.clear();
     for (const src of Array.from(this.activeSources)) {
       try {
         src.stop();

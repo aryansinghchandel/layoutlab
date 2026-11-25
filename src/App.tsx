@@ -69,6 +69,7 @@ import {
   buildMasterAudioSchedule,
   decodeSoundBankFiles,
   LiveAudioEngine,
+  SYNTH_KEYCLICK_ID,
 } from './utils/soundEngine';
 import type { ScriptTemplate } from './utils/templates';
 import {
@@ -448,6 +449,7 @@ export default function App() {
         nextAudioEventIdx += 1;
       }
       let wasDuckedForBlackout = false;
+      let wasInTypingWindow = false;
 
       setScrubTimeSec(null);
       setIsPlaying(true);
@@ -484,9 +486,23 @@ export default function App() {
         accumulatedMs += safeDelta * speedRatio;
 
         const currentVideoSec = accumulatedMs / 1000;
+        const frame = timeline.evaluateAt(accumulatedMs);
 
-        // Fire sample-accurate one-shot SFX events with 25ms lookahead
+        // Immediately silence any active typing SFX the exact millisecond user_typing / [TYPING...] ends or send highlights
+        const inTypingNow = audioSchedule.typingWindowsMs.some(
+          (w) => accumulatedMs >= w.startMs && accumulatedMs < w.endMs
+        );
+        if (
+          liveAudio &&
+          ((wasInTypingWindow && !inTypingNow) || frame.sendHighlighted)
+        ) {
+          liveAudio.stopTypingSources();
+        }
+        wasInTypingWindow = inTypingNow;
+
+        // Fire sample-accurate one-shot SFX & typing keyclick events with 25ms lookahead
         if (liveAudio && nextAudioEventIdx < audioSchedule.events.length) {
+          const safeSpeedScale = speedRatio > 0 ? speedRatio : 1;
           while (
             nextAudioEventIdx < audioSchedule.events.length &&
             audioSchedule.events[nextAudioEventIdx].timeMs <= accumulatedMs + 25
@@ -494,19 +510,32 @@ export default function App() {
             const ev = audioSchedule.events[nextAudioEventIdx];
             nextAudioEventIdx += 1;
             if (!masterAudioMutedRef.current) {
-              const file = audioFileMap.get(ev.fileId);
-              if (file) {
-                const delaySec = Math.max(0, (ev.timeMs - accumulatedMs) / 1000);
-                liveAudio.playOneShot(file.buffer, ev.volume, {
+              // Skip stale typing events if we already exited the typing phase
+              if (ev.isTyping && !inTypingNow && ev.timeMs <= accumulatedMs) {
+                continue;
+              }
+              const buffer =
+                ev.fileId === SYNTH_KEYCLICK_ID
+                  ? liveAudio.getSynthKeyclickBuffer()
+                  : audioFileMap.get(ev.fileId)?.buffer ?? null;
+              if (buffer) {
+                const delaySec = Math.max(
+                  0,
+                  (ev.timeMs - accumulatedMs) / (1000 * safeSpeedScale)
+                );
+                const maxDurationSec = ev.maxDurationSec
+                  ? Math.max(0.015, ev.maxDurationSec / safeSpeedScale)
+                  : undefined;
+                liveAudio.playOneShot(buffer, ev.volume, {
                   delaySec,
-                  maxDurationSec: ev.maxDurationSec,
+                  maxDurationSec,
+                  pitchRate: ev.pitchRate,
+                  isTyping: ev.isTyping,
                 });
               }
             }
           }
         }
-
-        const frame = timeline.evaluateAt(accumulatedMs);
 
         // Duck background loop immediately during hard cut to black
         if (liveAudio && audioSchedule.backgroundFile) {
@@ -865,6 +894,7 @@ export default function App() {
       if (liveAudioRef.current) {
         if (nextMuted) {
           liveAudioRef.current.setBackgroundLoopGain(0);
+          liveAudioRef.current.stopTypingSources();
         } else if (
           backgroundLoopRef.current.enabled &&
           !backgroundLoopRef.current.muted

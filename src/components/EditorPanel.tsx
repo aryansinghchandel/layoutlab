@@ -2186,9 +2186,11 @@ export const EditorPanel = React.memo(function EditorPanel({
                     <div className="mb-1 flex items-center justify-between text-[11px] font-semibold text-slate-500">
                       <span>Video Audio Track</span>
                       <span className="text-[10px] text-slate-400">
-                        {soundBank.length > 0 && !masterAudioMuted
-                          ? 'SFX + Loop ready'
-                          : 'Silent until loaded'}
+                        {masterAudioMuted
+                          ? 'Master audio muted'
+                          : soundBank.length > 0
+                            ? 'SFX + Loop ready'
+                            : 'Built-in typing SFX'}
                       </span>
                     </div>
                     <div className="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1">
@@ -2230,9 +2232,7 @@ export const EditorPanel = React.memo(function EditorPanel({
                   <span>
                     MP4 Video (60 FPS){' '}
                     <span className="text-[10.5px] font-semibold text-slate-400">
-                      {videoAudioMode === 'baked' &&
-                      soundBank.length > 0 &&
-                      !masterAudioMuted
+                      {videoAudioMode === 'baked' && !masterAudioMuted
                         ? '· + Audio'
                         : '· Silent'}
                     </span>
@@ -2251,9 +2251,7 @@ export const EditorPanel = React.memo(function EditorPanel({
                   <span>
                     WebM Video (60 FPS){' '}
                     <span className="text-[10.5px] font-semibold text-slate-400">
-                      {videoAudioMode === 'baked' &&
-                      soundBank.length > 0 &&
-                      !masterAudioMuted
+                      {videoAudioMode === 'baked' && !masterAudioMuted
                         ? '· + Audio'
                         : '· Silent'}
                     </span>
@@ -2278,7 +2276,9 @@ export const EditorPanel = React.memo(function EditorPanel({
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={isExportingWav || soundBank.length === 0}
+                  disabled={
+                    isExportingWav || masterAudioMuted || messages.length === 0
+                  }
                   onClick={() => {
                     setOpenMenu(null);
                     onExportWavStem();

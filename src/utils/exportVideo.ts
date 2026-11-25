@@ -6,14 +6,15 @@ import {
   ArrayBufferTarget as WebmArrayBufferTarget,
   Muxer as WebmMuxer,
 } from 'webm-muxer';
-import type {
-  AnimationFormat,
-  BackgroundLoopConfig,
-  ChatMessage,
-  PlaybackSpeed,
-  SoundBankFile,
-  VideoAudioMode,
-  VideoQuality,
+import {
+  type AnimationFormat,
+  type BackgroundLoopConfig,
+  type ChatMessage,
+  DEFAULT_BACKGROUND_LOOP,
+  type PlaybackSpeed,
+  type SoundBankFile,
+  type VideoAudioMode,
+  type VideoQuality,
 } from '../types';
 import {
   buildAnimationTimeline,
@@ -407,9 +408,6 @@ export async function exportAudioStemWav(params: {
   if (messages.length === 0) {
     throw new Error('Add at least one message before exporting a WAV audio stem.');
   }
-  if (soundBank.length === 0) {
-    throw new Error('Load your Sound Bank first to render the synced WAV audio stem.');
-  }
 
   const timeline = buildAnimationTimeline(
     messages,
@@ -698,21 +696,16 @@ export function startNativeAnimationExport(params: {
       Math.ceil(timeline.totalDurationMs / FRAME_STEP_MS) + 1
     );
 
-    // Offline render synced audio mix (Background Loop + per-line SFX + GIF overlay SFX)
+    // Offline render synced audio mix (Background Loop + typing SFX + per-line SFX + GIF overlay SFX)
     let renderedAudioBuffer: AudioBuffer | null = null;
-    if (
-      audioMode === 'baked' &&
-      !masterAudioMuted &&
-      soundBank.length > 0 &&
-      backgroundLoop
-    ) {
+    if (audioMode === 'baked' && !masterAudioMuted) {
       const schedule = buildMasterAudioSchedule({
         timeline,
         messages,
         overlays: config.overlays ?? [],
         previewMode: config.previewMode,
         soundBank,
-        backgroundLoop,
+        backgroundLoop: backgroundLoop ?? DEFAULT_BACKGROUND_LOOP,
         masterMuted: masterAudioMuted,
       });
       if (schedule.events.length > 0 || schedule.backgroundFile) {

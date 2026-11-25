@@ -147,6 +147,8 @@ export interface ScheduledAudioEvent {
   fileId: string;
   volume: number;
   maxDurationSec?: number;
+  pitchRate?: number;
+  isTyping?: boolean;
   sourceLabel?: string;
 }
 
